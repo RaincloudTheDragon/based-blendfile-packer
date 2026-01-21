@@ -78,26 +78,23 @@ class SHEEPIT_PT_output_panel(Panel):
         col = layout.column()
         col.scale_y = 1.5
         
+        # Submit Current Blend button (first)
+        op = col.operator("sheepit.submit_current", text="Submit Current Blend", icon='EXPORT')
+        
         # Submit as ZIP button
-        op = col.operator("sheepit.pack_copy_only", text="Submit as ZIP (for scenes with caches)", icon='PACKAGE')
+        op = col.operator("sheepit.pack_zip", text="Submit as ZIP (for scenes with caches)", icon='PACKAGE')
         
         # Submit as Blend button
-        op = col.operator("sheepit.pack_and_save", text="Submit as Blend", icon='FILE_BLEND')
+        op = col.operator("sheepit.pack_blend", text="Submit as Blend", icon='FILE_BLEND')
         
-        # Show pack output path if available
+        # Show pack output path if available (for debugging)
         if submit_settings.pack_output_path:
             layout.separator()
             box = layout.box()
-            box.label(text="Packed Output:", icon='FILE_FOLDER')
+            box.label(text="Last Packed Output:", icon='FILE_FOLDER')
             row = box.row()
             row.scale_x = 0.8
             row.label(text=submit_settings.pack_output_path)
-            
-            # Submit button (only shown after packing)
-            layout.separator()
-            row = layout.row()
-            row.scale_y = 1.5
-            row.operator("sheepit.submit_project", text="Submit to SheepIt", icon='EXPORT')
 
 
 def register():
