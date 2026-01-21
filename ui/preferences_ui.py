@@ -48,8 +48,29 @@ class SHEEPIT_OT_test_connection(Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
-        prefs = context.preferences.addons[config.ADDON_ID].preferences
+        if not bpy.app.online_access:
+            self.report({'ERROR'}, "Online access is disabled. Enable it in Preferences → System.")
+            return {'CANCELLED'}
         
+        prefs = compat.get_addon_prefs()
+        if not prefs:
+            self.report({'ERROR'}, "Addon preferences not found.")
+            return {'CANCELLED'}
+        
+        # Try browser login cookies first
+        if prefs.use_browser_login:
+            from ..utils.auth import load_auth_cookies
+            cookies = load_auth_cookies()
+            if cookies:
+                # Test with cookies
+                # TODO: Implement actual API test with cookies
+                self.report({'INFO'}, "Browser login cookies found. Connection test not yet implemented.")
+                return {'FINISHED'}
+            else:
+                self.report({'ERROR'}, "No browser login cookies found. Please login via browser first.")
+                return {'CANCELLED'}
+        
+        # Fallback to username/password or render key
         if not prefs.sheepit_username:
             self.report({'ERROR'}, "Username is required")
             return {'CANCELLED'}
@@ -98,8 +119,41 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         subtype='PASSWORD',
     )
     
+    # Browser login status
+    use_browser_login: BoolProperty(
+        name="Use Browser Login",
+        description="Login via browser and reuse session cookies (more secure, recommended)",
+        default=True,
+    )
+    
+    auth_status: StringProperty(
+        name="Auth Status",
+        description="Current authentication status",
+        default="Not logged in",
+    )
+    
+    # Manual session token entry (for browser login)
+    session_token: StringProperty(
+        name="Session Token",
+        description="Session token from browser (extract from browser cookies after login)",
+        default="",
+        subtype='PASSWORD',
+    )
+    
     def draw(self, context):
         layout = self.layout
+        
+        # Update auth status if using browser login
+        if self.use_browser_login:
+            # Use direct import to avoid circular import issues
+            from ..utils.auth import load_auth_cookies
+            cookies = load_auth_cookies()
+            if cookies:
+                if self.auth_status == "Not logged in":
+                    self.auth_status = "Logged in (Browser)"
+            else:
+                if self.auth_status != "Not logged in":
+                    self.auth_status = "Not logged in"
         
         # Header
         box = layout.box()
@@ -135,11 +189,51 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         
         layout.separator()
         
+        # Browser login option
+        box = layout.box()
+        box.label(text="Browser Login (Recommended):", icon='WORLD')
+        box.prop(self, "use_browser_login")
+        
+        if self.use_browser_login:
+            row = box.row()
+            row.label(text=f"Status: {self.auth_status}")
+            
+            if self.auth_status == "Not logged in" or "Please login" in self.auth_status:
+                row = box.row()
+                row.scale_y = 1.2
+                row.operator("sheepit.browser_login", text="Open Browser for Login", icon='WORLD')
+                
+                # Instructions
+                box.label(text="After logging in:", icon='INFO')
+                box.label(text="1. Open browser DevTools (F12)")
+                box.label(text="2. Go to Application/Storage → Cookies")
+                box.label(text="3. Find 'session' or 'PHPSESSID' cookie")
+                box.label(text="4. Copy its value and paste below:")
+                
+                # Token entry
+                row = box.row()
+                row.prop(self, "session_token")
+                row = box.row()
+                row.scale_y = 1.2
+                row.operator("sheepit.verify_login", text="Save Session Token", icon='CHECKMARK')
+            else:
+                row = box.row()
+                row.scale_y = 1.2
+                row.operator("sheepit.logout", text="Logout", icon='QUIT')
+        
+        layout.separator()
+        
         # Info box
         box = layout.box()
-        box.label(text="About Render Keys:", icon='QUESTION')
-        box.label(text="Render Keys allow rendering without full account access.")
-        box.label(text="They are safer to use in scripts and on shared machines.")
+        box.label(text="About Authentication:", icon='QUESTION')
+        if self.use_browser_login:
+            box.label(text="Browser Login: More secure than storing passwords.")
+            box.label(text="Session tokens are stored encrypted on your system.")
+            box.label(text="To get session token: Browser DevTools → Cookies → Copy session value.")
+        else:
+            box.label(text="Render Keys: Allow rendering without full account access.")
+            box.label(text="They are safer to use in scripts and on shared machines.")
+            box.label(text="Get your Render Key from: Profile → Edit Profile → Render keys")
 
 
 reg_list = [SHEEPIT_AddonPreferences]

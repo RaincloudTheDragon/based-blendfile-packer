@@ -41,9 +41,20 @@ class SHEEPIT_OT_submit_project(Operator):
             return {'CANCELLED'}
         
         sheepit_prefs = prefs.preferences
-        if not sheepit_prefs.sheepit_username or not (sheepit_prefs.sheepit_password or sheepit_prefs.sheepit_render_key):
-            self.report({'ERROR'}, "Please configure SheepIt username and password/render key in preferences.")
-            return {'CANCELLED'}
+        
+        # Check authentication method
+        if sheepit_prefs.use_browser_login:
+            # Use browser login cookies
+            from ..utils.auth import load_auth_cookies
+            cookies = load_auth_cookies()
+            if not cookies:
+                self.report({'ERROR'}, "No browser login session found. Please login via browser in preferences.")
+                return {'CANCELLED'}
+        else:
+            # Use username/password or render key
+            if not sheepit_prefs.sheepit_username or not (sheepit_prefs.sheepit_password or sheepit_prefs.sheepit_render_key):
+                self.report({'ERROR'}, "Please configure SheepIt username and password/render key in preferences.")
+                return {'CANCELLED'}
         
         try:
             # Determine if we need to create a ZIP
