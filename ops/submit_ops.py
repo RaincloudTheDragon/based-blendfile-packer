@@ -35,12 +35,11 @@ class SHEEPIT_OT_submit_project(Operator):
             return {'CANCELLED'}
         
         # Get preferences for authentication
-        prefs = context.preferences.addons.get(config.ADDON_ID)
-        if not prefs or not prefs.preferences:
+        from ..utils.compat import get_addon_prefs
+        sheepit_prefs = get_addon_prefs()
+        if not sheepit_prefs:
             self.report({'ERROR'}, "Addon preferences not found. Please configure SheepIt credentials in preferences.")
             return {'CANCELLED'}
-        
-        sheepit_prefs = prefs.preferences
         
         # Check authentication method
         if sheepit_prefs.use_browser_login:
@@ -51,9 +50,9 @@ class SHEEPIT_OT_submit_project(Operator):
                 self.report({'ERROR'}, "No browser login session found. Please login via browser in preferences.")
                 return {'CANCELLED'}
         else:
-            # Use username/password or render key
-            if not sheepit_prefs.sheepit_username or not (sheepit_prefs.sheepit_password or sheepit_prefs.sheepit_render_key):
-                self.report({'ERROR'}, "Please configure SheepIt username and password/render key in preferences.")
+            # Use username/password
+            if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
+                self.report({'ERROR'}, "Please configure SheepIt username and password in preferences.")
                 return {'CANCELLED'}
         
         try:

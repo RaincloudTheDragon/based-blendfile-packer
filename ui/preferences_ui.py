@@ -70,13 +70,13 @@ class SHEEPIT_OT_test_connection(Operator):
                 self.report({'ERROR'}, "No browser login cookies found. Please login via browser first.")
                 return {'CANCELLED'}
         
-        # Fallback to username/password or render key
+        # Fallback to username/password
         if not prefs.sheepit_username:
             self.report({'ERROR'}, "Username is required")
             return {'CANCELLED'}
         
-        if not prefs.sheepit_password and not prefs.sheepit_render_key:
-            self.report({'ERROR'}, "Password or Render Key is required")
+        if not prefs.sheepit_password:
+            self.report({'ERROR'}, "Password is required")
             return {'CANCELLED'}
         
         # Placeholder for actual API test
@@ -101,20 +101,7 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
     
     sheepit_password: StringProperty(
         name="Password",
-        description="Your SheepIt account password (or leave empty to use Render Key)",
-        default="",
-        subtype='PASSWORD',
-    )
-    
-    use_render_key: BoolProperty(
-        name="Use Render Key",
-        description="Use Render Key instead of password (more secure for scripts)",
-        default=False,
-    )
-    
-    sheepit_render_key: StringProperty(
-        name="Render Key",
-        description="Your SheepIt Render Key (found in profile settings)",
+        description="Your SheepIt account password",
         default="",
         subtype='PASSWORD',
     )
@@ -163,21 +150,9 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         row = box.row()
         row.prop(self, "sheepit_username")
         
-        # Password/Render Key toggle
+        # Password
         row = box.row()
-        row.prop(self, "use_render_key")
-        
-        if self.use_render_key:
-            # Render Key
-            row = box.row()
-            row.prop(self, "sheepit_render_key")
-            box.label(text="Get your Render Key from:", icon='INFO')
-            box.label(text="Profile → Edit Profile → Render keys")
-        else:
-            # Password
-            row = box.row()
-            row.prop(self, "sheepit_password")
-            box.label(text="For better security, consider using a Render Key", icon='INFO')
+        row.prop(self, "sheepit_password")
         
         layout.separator()
         
@@ -231,9 +206,8 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
             box.label(text="Session tokens are stored encrypted on your system.")
             box.label(text="To get session token: Browser DevTools → Cookies → Copy session value.")
         else:
-            box.label(text="Render Keys: Allow rendering without full account access.")
-            box.label(text="They are safer to use in scripts and on shared machines.")
-            box.label(text="Get your Render Key from: Profile → Edit Profile → Render keys")
+            box.label(text="Username/Password: Traditional login method.")
+            box.label(text="For better security, consider using Browser Login instead.")
 
 
 reg_list = [SHEEPIT_AddonPreferences]
