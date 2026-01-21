@@ -38,7 +38,7 @@ jobs:
           mkdir -p "$ADDON_DIR"
 
           # Copy top-level files if they exist
-          for file in __init__.py blender_manifest.toml README.md CHANGELOG.md LICENSE.txt config.py; do
+          for file in __init__.py rainys_repo_bootstrap.py blender_manifest.toml README.md CHANGELOG.md LICENSE.txt config.py; do
             if [ -f "$file" ]; then
               cp "$file" "$ADDON_DIR"/
             else

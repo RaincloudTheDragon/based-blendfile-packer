@@ -10,6 +10,8 @@ from bpy.utils import register_class
 from .utils import compat
 from . import ops
 from . import ui
+from . import rainys_repo_bootstrap
+from .ui.preferences_ui import SHEEPIT_AddonPreferences
 
 
 # SheepIt Submit Settings Property Group
@@ -99,22 +101,32 @@ def register():
     """Register the addon."""
     from .utils import compat
     
+    # Register preferences first (needed for Blender to show preferences UI)
+    compat.safe_register_class(SHEEPIT_AddonPreferences)
+    
     compat.safe_register_class(SHEEPIT_PG_submit_settings)
     bpy.types.Scene.sheepit_submit = bpy.props.PointerProperty(type=SHEEPIT_PG_submit_settings)
     
     # Register operators and UI
     ops.register()
     ui.register()
+    
+    # Bootstrap Rainy's Extensions repository
+    rainys_repo_bootstrap.register()
 
 
 def unregister():
     """Unregister the addon."""
     from .utils import compat
     
+    # Bootstrap unregistration
+    rainys_repo_bootstrap.unregister()
+    
     # Unregister operators and UI
     ui.unregister()
     ops.unregister()
     
     compat.safe_unregister_class(SHEEPIT_PG_submit_settings)
+    compat.safe_unregister_class(SHEEPIT_AddonPreferences)
     if hasattr(bpy.types.Scene, 'sheepit_submit'):
         del bpy.types.Scene.sheepit_submit

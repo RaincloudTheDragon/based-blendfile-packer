@@ -112,11 +112,13 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
 
 def register():
     """Register preferences and operators."""
-    compat.safe_register_class(SHEEPIT_AddonPreferences)
+    # Preferences class is registered in main __init__.py
+    # Only register the test connection operator here
     compat.safe_register_class(SHEEPIT_OT_test_connection)
 
 
 def unregister():
     """Unregister preferences and operators."""
+    # Preferences class is unregistered in main __init__.py
+    # Only unregister the test connection operator here
     compat.safe_unregister_class(SHEEPIT_OT_test_connection)
-    compat.safe_unregister_class(SHEEPIT_AddonPreferences)
