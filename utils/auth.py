@@ -302,6 +302,10 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
         return False, "No cookies provided", None
     
     print(f"[SheepIt Auth] Test Connection: Testing with cookies: {list(cookies.keys())}")
+    # Show cookie values (truncated for security)
+    for key, value in cookies.items():
+        value_preview = value[:20] + "..." if len(value) > 20 else value
+        print(f"[SheepIt Auth] Test Connection:   Cookie '{key}': {value_preview} (length: {len(value)})")
     
     # Try protected endpoints in order
     # Note: Actual endpoint paths may vary - these are common patterns
@@ -314,7 +318,12 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
     ]
     
     headers = get_auth_headers(cookies)
-    config.debug_print(f"Test Connection: Using headers: {list(headers.keys())}")
+    print(f"[SheepIt Auth] Test Connection: Request headers: {list(headers.keys())}")
+    if 'Cookie' in headers:
+        cookie_header_preview = headers['Cookie'][:100] + "..." if len(headers['Cookie']) > 100 else headers['Cookie']
+        print(f"[SheepIt Auth] Test Connection:   Cookie header: {cookie_header_preview}")
+    if 'User-Agent' in headers:
+        print(f"[SheepIt Auth] Test Connection:   User-Agent: {headers['User-Agent']}")
     
     for endpoint in test_endpoints:
         try:
@@ -326,10 +335,26 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
             opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
             
             try:
+                import time
+                start_time = time.time()
                 with opener.open(req, timeout=10) as response:
+                    elapsed_time = time.time() - start_time
                     # Check if we got redirected to login page
                     final_url = response.geturl()
+                    print(f"[SheepIt Auth] Test Connection: Response received in {elapsed_time:.2f}s")
                     print(f"[SheepIt Auth] Test Connection: Response status: {response.status}, Final URL: {final_url}")
+                    
+                    # Log response headers
+                    response_headers = dict(response.headers)
+                    print(f"[SheepIt Auth] Test Connection: Response headers: {list(response_headers.keys())}")
+                    if 'Location' in response_headers:
+                        print(f"[SheepIt Auth] Test Connection:   Location header: {response_headers['Location']}")
+                    if 'Set-Cookie' in response_headers:
+                        print(f"[SheepIt Auth] Test Connection:   Set-Cookie header present (new cookies may be set)")
+                    if 'Content-Type' in response_headers:
+                        print(f"[SheepIt Auth] Test Connection:   Content-Type: {response_headers['Content-Type']}")
+                    if 'Content-Length' in response_headers:
+                        print(f"[SheepIt Auth] Test Connection:   Content-Length: {response_headers['Content-Length']} bytes")
                     
                     # Check for redirect to login (handle URL-encoded paths too)
                     # The %25252F is double-encoded: %2525 = %25 = %, so %25252F = %2F = /
@@ -342,15 +367,31 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
                     # Also check response content for login indicators
                     try:
                         # Read a small portion to check for login page indicators
-                        response.peek(1000)  # Peek at first 1000 bytes without consuming
                         response_data = response.read(5000).decode('utf-8', errors='ignore')
-                        if 'sign in' in response_data.lower() or 'login' in response_data.lower():
+                        print(f"[SheepIt Auth] Test Connection: Read {len(response_data)} bytes of response content")
+                        
+                        # Check for login page indicators
+                        has_signin = 'sign in' in response_data.lower()
+                        has_login = 'login' in response_data.lower()
+                        has_username_field = 'username' in response_data.lower() or 'name="username"' in response_data.lower()
+                        has_password_field = 'password' in response_data.lower() or 'type="password"' in response_data.lower()
+                        
+                        print(f"[SheepIt Auth] Test Connection: Content analysis:")
+                        print(f"[SheepIt Auth] Test Connection:   Contains 'sign in': {has_signin}")
+                        print(f"[SheepIt Auth] Test Connection:   Contains 'login': {has_login}")
+                        print(f"[SheepIt Auth] Test Connection:   Has username field: {has_username_field}")
+                        print(f"[SheepIt Auth] Test Connection:   Has password field: {has_password_field}")
+                        
+                        if has_signin or has_login:
                             # Check if it's actually a login page or just mentions login
-                            if 'username' in response_data.lower() and 'password' in response_data.lower():
-                                print(f"[SheepIt Auth] Test Connection: Login page detected in content, trying next endpoint")
+                            if has_username_field and has_password_field:
+                                print(f"[SheepIt Auth] Test Connection: Login page detected in content (has both username and password fields), trying next endpoint")
                                 continue
-                    except Exception:
-                        pass  # If we can't read, continue with status check
+                            else:
+                                print(f"[SheepIt Auth] Test Connection: Mentions login but not a login form, continuing...")
+                    except Exception as e:
+                        print(f"[SheepIt Auth] Test Connection: Could not read response content: {type(e).__name__}: {str(e)}")
+                        # If we can't read, continue with status check
                     
                     # If we got here and status is 200, we're authenticated
                     if response.status == 200:
@@ -358,20 +399,55 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
                         # Try to extract username from response
                         user_info = {}
                         try:
-                            html = response.read().decode('utf-8', errors='ignore')
+                            # Read remaining content if we haven't already
+                            if 'response_data' not in locals():
+                                html = response.read().decode('utf-8', errors='ignore')
+                            else:
+                                # We already read some, read the rest
+                                remaining = response.read().decode('utf-8', errors='ignore')
+                                html = response_data + remaining
+                            
+                            print(f"[SheepIt Auth] Test Connection: Total HTML length: {len(html)} bytes")
+                            
                             # Look for username in common patterns
                             # This is a simple heuristic - may need adjustment based on actual HTML structure
-                            if 'username' in html.lower() or 'profile' in html.lower():
+                            has_username_mention = 'username' in html.lower()
+                            has_profile_mention = 'profile' in html.lower()
+                            has_user_info = has_username_mention or has_profile_mention
+                            
+                            print(f"[SheepIt Auth] Test Connection: HTML analysis:")
+                            print(f"[SheepIt Auth] Test Connection:   Contains 'username': {has_username_mention}")
+                            print(f"[SheepIt Auth] Test Connection:   Contains 'profile': {has_profile_mention}")
+                            
+                            if has_user_info:
                                 # Could parse HTML here to extract username, but for now just indicate success
                                 user_info['authenticated'] = True
-                        except Exception:
-                            pass
+                                print(f"[SheepIt Auth] Test Connection: User info indicators found in HTML")
+                        except Exception as e:
+                            print(f"[SheepIt Auth] Test Connection: Could not analyze HTML: {type(e).__name__}: {str(e)}")
                         
                         return True, "Connection successful! Authentication verified.", user_info
                     
             except urllib.error.HTTPError as e:
                 # HTTPError is raised for non-2xx status codes
                 print(f"[SheepIt Auth] Test Connection: HTTPError {e.code} on {endpoint}")
+                print(f"[SheepIt Auth] Test Connection:   Error URL: {e.url}")
+                print(f"[SheepIt Auth] Test Connection:   Error reason: {e.reason}")
+                
+                # Log error response headers
+                if hasattr(e, 'headers'):
+                    error_headers = dict(e.headers)
+                    print(f"[SheepIt Auth] Test Connection:   Error response headers: {list(error_headers.keys())}")
+                    if 'Location' in error_headers:
+                        print(f"[SheepIt Auth] Test Connection:     Location: {error_headers['Location']}")
+                
+                # Try to read error response body
+                try:
+                    error_body = e.read().decode('utf-8', errors='ignore')[:500]  # First 500 chars
+                    print(f"[SheepIt Auth] Test Connection:   Error response body (first 500 chars): {error_body[:100]}...")
+                except Exception:
+                    pass
+                
                 if e.code in (401, 403):
                     # Not authenticated
                     print(f"[SheepIt Auth] Test Connection: Not authenticated (401/403), trying next endpoint")
@@ -391,11 +467,20 @@ def _test_with_cookies(cookies: Dict[str, str]) -> Tuple[bool, str, Optional[Dic
                     
         except urllib.error.URLError as e:
             # Network error
-            print(f"[SheepIt Auth] Test Connection: Network error: {str(e)}")
+            print(f"[SheepIt Auth] Test Connection: Network error on {endpoint}: {type(e).__name__}: {str(e)}")
+            if hasattr(e, 'reason'):
+                print(f"[SheepIt Auth] Test Connection:   Reason: {e.reason}")
+            if hasattr(e, 'code'):
+                print(f"[SheepIt Auth] Test Connection:   Code: {e.code}")
             return False, f"Network error: {str(e)}", None
         except Exception as e:
             # Other error, try next endpoint
             print(f"[SheepIt Auth] Test Connection: Exception on {endpoint}: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"[SheepIt Auth] Test Connection:   Traceback:")
+            for line in traceback.format_exc().split('\n'):
+                if line.strip():
+                    print(f"[SheepIt Auth] Test Connection:     {line}")
             continue
     
     # If we get here, none of the endpoints worked
@@ -420,11 +505,13 @@ def _test_with_credentials(username: str, password: str) -> Tuple[bool, str]:
     import http.cookiejar
     
     print(f"[SheepIt Auth] Test Connection: Testing with username/password for user: {username}")
+    print(f"[SheepIt Auth] Test Connection: Password length: {len(password)} characters")
     
     try:
         # Create cookie jar to handle session cookies
         cookie_jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        print(f"[SheepIt Auth] Test Connection: Created cookie jar and opener")
         
         # Login URL
         login_url = f"{config.SHEEPIT_CLIENT_BASE}/user/signin"
@@ -432,13 +519,34 @@ def _test_with_credentials(username: str, password: str) -> Tuple[bool, str]:
         
         # First, get the login page to check for CSRF tokens or form structure
         try:
+            import time
             req = urllib.request.Request(login_url)
             req.add_header('User-Agent', f'SheepIt-Blender-Addon/{config.ADDON_ID}')
+            print(f"[SheepIt Auth] Test Connection: Request headers: User-Agent: {req.get_header('User-Agent')}")
+            
+            start_time = time.time()
             with opener.open(req, timeout=10) as response:
+                elapsed_time = time.time() - start_time
                 login_page = response.read().decode('utf-8', errors='ignore')
-                print(f"[SheepIt Auth] Test Connection: Login page loaded, status: {response.status}")
+                print(f"[SheepIt Auth] Test Connection: Login page loaded in {elapsed_time:.2f}s, status: {response.status}")
+                print(f"[SheepIt Auth] Test Connection: Login page size: {len(login_page)} bytes")
+                print(f"[SheepIt Auth] Test Connection: Final URL: {response.geturl()}")
+                
+                # Log response headers
+                response_headers = dict(response.headers)
+                print(f"[SheepIt Auth] Test Connection: Response headers: {list(response_headers.keys())}")
+                
+                # Check for initial cookies set
+                if len(cookie_jar) > 0:
+                    print(f"[SheepIt Auth] Test Connection: Cookies received from login page: {len(cookie_jar)}")
+                    for cookie in cookie_jar:
+                        print(f"[SheepIt Auth] Test Connection:   Cookie: {cookie.name} = {cookie.value[:20]}... (domain: {cookie.domain})")
+                else:
+                    print(f"[SheepIt Auth] Test Connection: No cookies received from login page")
         except Exception as e:
-            print(f"[SheepIt Auth] Test Connection: Failed to load login page: {str(e)}")
+            print(f"[SheepIt Auth] Test Connection: Failed to load login page: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False, f"Failed to load login page: {str(e)}"
         
         # Prepare login data
@@ -451,25 +559,67 @@ def _test_with_credentials(username: str, password: str) -> Tuple[bool, str]:
         # Look for CSRF token in the page (common in PHP apps)
         # This is a simple approach - may need refinement
         import re
-        csrf_match = re.search(r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']', login_page, re.IGNORECASE)
-        if csrf_match:
-            login_data['csrf_token'] = csrf_match.group(1)
-            print(f"[SheepIt Auth] Test Connection: Found CSRF token")
-        else:
-            print(f"[SheepIt Auth] Test Connection: No CSRF token found")
+        print(f"[SheepIt Auth] Test Connection: Searching for CSRF token in login page...")
+        csrf_patterns = [
+            r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']',
+            r'name=["\']_token["\']\s+value=["\']([^"\']+)["\']',
+            r'name=["\']csrf["\']\s+value=["\']([^"\']+)["\']',
+            r'csrf["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+        ]
+        csrf_token = None
+        for pattern in csrf_patterns:
+            csrf_match = re.search(pattern, login_page, re.IGNORECASE)
+            if csrf_match:
+                csrf_token = csrf_match.group(1)
+                print(f"[SheepIt Auth] Test Connection: Found CSRF token using pattern: {pattern[:30]}...")
+                print(f"[SheepIt Auth] Test Connection:   Token value: {csrf_token[:20]}... (length: {len(csrf_token)})")
+                login_data['csrf_token'] = csrf_token
+                break
+        
+        if not csrf_token:
+            print(f"[SheepIt Auth] Test Connection: No CSRF token found (tried {len(csrf_patterns)} patterns)")
+        
+        # Look for form field names
+        form_fields = re.findall(r'name=["\']([^"\']+)["\']', login_page)
+        print(f"[SheepIt Auth] Test Connection: Found form fields: {form_fields[:10]}...")  # First 10
         
         # Submit login form
         print(f"[SheepIt Auth] Test Connection: Submitting login form")
+        print(f"[SheepIt Auth] Test Connection: Login data keys: {list(login_data.keys())}")
         data = urllib.parse.urlencode(login_data).encode('utf-8')
+        print(f"[SheepIt Auth] Test Connection: POST data length: {len(data)} bytes")
         req = urllib.request.Request(login_url, data=data)
         req.add_header('User-Agent', f'SheepIt-Blender-Addon/{config.ADDON_ID}')
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
         req.add_header('Referer', login_url)
+        print(f"[SheepIt Auth] Test Connection: Request headers:")
+        print(f"[SheepIt Auth] Test Connection:   User-Agent: {req.get_header('User-Agent')}")
+        print(f"[SheepIt Auth] Test Connection:   Content-Type: {req.get_header('Content-Type')}")
+        print(f"[SheepIt Auth] Test Connection:   Referer: {req.get_header('Referer')}")
         
         try:
+            import time
+            start_time = time.time()
             with opener.open(req, timeout=10) as response:
+                elapsed_time = time.time() - start_time
                 final_url = response.geturl()
+                print(f"[SheepIt Auth] Test Connection: Login response received in {elapsed_time:.2f}s")
                 print(f"[SheepIt Auth] Test Connection: Login response status: {response.status}, Final URL: {final_url}")
+                
+                # Log response headers
+                response_headers = dict(response.headers)
+                print(f"[SheepIt Auth] Test Connection: Response headers: {list(response_headers.keys())}")
+                if 'Location' in response_headers:
+                    print(f"[SheepIt Auth] Test Connection:   Location: {response_headers['Location']}")
+                if 'Set-Cookie' in response_headers:
+                    print(f"[SheepIt Auth] Test Connection:   Set-Cookie header present")
+                    set_cookies = response_headers.get_all('Set-Cookie', [])
+                    print(f"[SheepIt Auth] Test Connection:   Number of Set-Cookie headers: {len(set_cookies)}")
+                
+                # Check cookies in jar
+                print(f"[SheepIt Auth] Test Connection: Cookies in jar after login: {len(cookie_jar)}")
+                for cookie in cookie_jar:
+                    print(f"[SheepIt Auth] Test Connection:   Cookie: {cookie.name} = {cookie.value[:30]}... (domain: {cookie.domain}, path: {cookie.path})")
                 
                 # Check if we got redirected away from login page (success)
                 if '/user/signin' not in final_url and '/user/login' not in final_url:

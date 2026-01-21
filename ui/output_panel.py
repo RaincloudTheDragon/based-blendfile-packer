@@ -95,8 +95,9 @@ class SHEEPIT_PT_output_panel(Panel):
             
             # Submit button (only shown after packing)
             layout.separator()
-            submit_op = layout.operator("sheepit.submit_project", text="Submit to SheepIt", icon='EXPORT')
-            submit_op.scale_y = 1.5
+            row = layout.row()
+            row.scale_y = 1.5
+            row.operator("sheepit.submit_project", text="Submit to SheepIt", icon='EXPORT')
 
 
 def register():
