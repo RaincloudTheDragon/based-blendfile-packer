@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "sheepit_project_submitter"
+name = "SheepIt Project Submitter"
+version = "1.0.0"
+type = "add-on"
+author = "RaincloudTheDragon"
+maintainer = "RaincloudTheDragon"
+blender_version_min = "3.0.0"
+license = ["GPL-3.0-or-later"]
+description = "Submit Blender projects to SheepIt render farm with automatic asset packing."
+homepage = "https://github.com/RaincloudTheDragon/sheepit-project-submitter/"
+tagline = "Submit projects to SheepIt render farm"
+
+tags = ["render", "farm", "submission", "utility"]
+
+# Python modules to load for this add-on
+modules = ["sheepit_project_submitter"]
