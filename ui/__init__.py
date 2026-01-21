@@ -10,8 +10,11 @@ __all__ = ["output_panel", "preferences_ui"]
 
 def register():
     """Register all UI classes."""
-    output_panel.register()
+    # Register preferences first so we can access variables in config.py
     preferences_ui.register()
+    
+    # Register other UI components
+    output_panel.register()
 
 
 def unregister():
