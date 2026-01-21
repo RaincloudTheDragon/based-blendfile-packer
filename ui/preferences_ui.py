@@ -142,34 +142,16 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
                 if self.auth_status != "Not logged in":
                     self.auth_status = "Not logged in"
         
-        # Header
+        # Main authentication box
         box = layout.box()
         box.label(text="SheepIt Authentication", icon='USER')
         
-        # Username
+        # Browser login toggle
         row = box.row()
-        row.prop(self, "sheepit_username")
-        
-        # Password
-        row = box.row()
-        row.prop(self, "sheepit_password")
-        
-        layout.separator()
-        
-        # Test connection button
-        box = layout.box()
-        row = box.row()
-        row.scale_y = 1.5
-        row.operator("sheepit.test_connection", icon='WORLD')
-        
-        layout.separator()
-        
-        # Browser login option
-        box = layout.box()
-        box.label(text="Browser Login (Recommended):", icon='WORLD')
-        box.prop(self, "use_browser_login")
+        row.prop(self, "use_browser_login")
         
         if self.use_browser_login:
+            # Browser login mode
             row = box.row()
             row.label(text=f"Status: {self.auth_status}")
             
@@ -195,11 +177,24 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
                 row = box.row()
                 row.scale_y = 1.2
                 row.operator("sheepit.logout", text="Logout", icon='QUIT')
+        else:
+            # Username/Password mode
+            row = box.row()
+            row.prop(self, "sheepit_username")
+            
+            row = box.row()
+            row.prop(self, "sheepit_password")
         
-        layout.separator()
+        box.separator()
+        
+        # Test connection button
+        row = box.row()
+        row.scale_y = 1.5
+        row.operator("sheepit.test_connection", icon='WORLD')
+        
+        box.separator()
         
         # Info box
-        box = layout.box()
         box.label(text="About Authentication:", icon='QUESTION')
         if self.use_browser_login:
             box.label(text="Browser Login: More secure than storing passwords.")
