@@ -1,0 +1,70 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Version
+        id: get_version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("blender_manifest.toml").read_text(encoding="utf-8"))
+          version = data["version"]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={version}\n")
+              fh.write(f"zip_name=SheepIt_Project_Submitter.v{version}.zip\n")
+          PY
+
+      - name: Create ZIP
+        run: |
+          ADDON_DIR=addon_files/sheepit_project_submitter
+          mkdir -p "$ADDON_DIR"
+
+          # Copy top-level files if they exist
+          for file in __init__.py blender_manifest.toml README.md CHANGELOG.md LICENSE.txt config.py; do
+            if [ -f "$file" ]; then
+              cp "$file" "$ADDON_DIR"/
+            else
+              echo "Skipping missing file: $file"
+            fi
+          done
+
+          # Copy packages
+          for dir in ops ui utils batter; do
+            if [ -d "$dir" ]; then
+              cp -r "$dir" "$ADDON_DIR"/
+            else
+              echo "Skipping missing directory: $dir"
+            fi
+          done
+
+          # Create the zip from the temporary directory
+          cd addon_files
+          zip -r "../${{ steps.get_version.outputs.zip_name }}" ./*
+
+      - name: Upload Release Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.get_version.outputs.zip_name }}
+          tag_name: ${{ inputs.release_tag }}
+          name: SheepIt Project Submitter ${{ steps.get_version.outputs.version }}
+          draft: true
