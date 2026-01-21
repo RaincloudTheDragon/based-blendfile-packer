@@ -57,32 +57,36 @@ class SHEEPIT_OT_test_connection(Operator):
             self.report({'ERROR'}, "Addon preferences not found.")
             return {'CANCELLED'}
         
-        # Try browser login cookies first
+        # Import test function
+        from ..utils.auth import test_connection
+        
+        # Test connection based on authentication method
         if prefs.use_browser_login:
-            from ..utils.auth import load_auth_cookies
-            cookies = load_auth_cookies()
-            if cookies:
-                # Test with cookies
-                # TODO: Implement actual API test with cookies
-                self.report({'INFO'}, "Browser login cookies found. Connection test not yet implemented.")
-                return {'FINISHED'}
-            else:
-                self.report({'ERROR'}, "No browser login cookies found. Please login via browser first.")
+            # Test with browser login cookies
+            success, message, user_info = test_connection(use_browser_login=True)
+        else:
+            # Test with username/password
+            if not prefs.sheepit_username:
+                self.report({'ERROR'}, "Username is required")
                 return {'CANCELLED'}
+            
+            if not prefs.sheepit_password:
+                self.report({'ERROR'}, "Password is required")
+                return {'CANCELLED'}
+            
+            success, message, user_info = test_connection(
+                use_browser_login=False,
+                username=prefs.sheepit_username,
+                password=prefs.sheepit_password
+            )
         
-        # Fallback to username/password
-        if not prefs.sheepit_username:
-            self.report({'ERROR'}, "Username is required")
+        # Report results
+        if success:
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, message)
             return {'CANCELLED'}
-        
-        if not prefs.sheepit_password:
-            self.report({'ERROR'}, "Password is required")
-            return {'CANCELLED'}
-        
-        # Placeholder for actual API test
-        # TODO: Implement actual API connection test
-        self.report({'INFO'}, "Connection test not yet implemented. Please verify credentials manually.")
-        return {'FINISHED'}
 
 
 class SHEEPIT_AddonPreferences(AddonPreferences):
