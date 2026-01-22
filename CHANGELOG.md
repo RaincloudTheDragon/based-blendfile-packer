@@ -1,3 +1,11 @@
+## [v0.0.3] - 2026-01-22
+
+### Changed
+- **Removed all website functionality** per SheepIt developer request
+- Operators now save packed files to user-specified locations instead of uploading
+- All authentication and website interaction code has been removed
+- Users must manually upload and configure projects on the SheepIt website
+
 ## [v0.0.2] - 2026-01-22
 
 ### Fixed
