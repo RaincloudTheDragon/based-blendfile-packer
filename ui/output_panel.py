@@ -28,6 +28,14 @@ class SHEEPIT_PT_output_panel(Panel):
             if prefs and prefs.default_output_path:
                 submit_settings.output_path = prefs.default_output_path
         
+        # Animation Setup Section
+        box = layout.box()
+        box.label(text="Animation Setup:", icon='ACTION')
+        col = box.column()
+        col.operator("sheepit.enable_nla", text="Disable Animation Layers", icon='ACTION')
+        
+        layout.separator()
+        
         # Frame Range Section
         box = layout.box()
         box.label(text="Frame Range:", icon='RENDER_ANIMATION')

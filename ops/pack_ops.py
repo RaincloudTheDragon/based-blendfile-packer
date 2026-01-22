@@ -1660,7 +1660,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                     self._packer = IncrementalPacker(
                         WorkflowMode.COPY_ONLY,
                         target_path=None,
-                        enable_nla=True,
+                        enable_nla=False,
                         progress_callback=progress_callback,
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
@@ -2217,7 +2217,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                     self._packer = IncrementalPacker(
                         WorkflowMode.PACK_AND_SAVE,
                         target_path=None,
-                        enable_nla=True,
+                        enable_nla=False,
                         progress_callback=progress_callback,
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
@@ -2448,13 +2448,80 @@ class SHEEPIT_OT_pack_blend(Operator):
         return self.invoke(context, None)
 
 
+class SHEEPIT_OT_enable_nla(Operator):
+    """Enable NLA for all objects by disabling animation layers, removing actions, and enabling NLA. Only for use with the Animation Layers addon."""
+    bl_idname = "sheepit.enable_nla"
+    bl_label = "Enable NLA"
+    bl_description = "Disable animation layers, remove current action, and enable NLA for all objects"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        """Execute the NLA enable operation."""
+        objects_processed = 0
+        animation_layers_disabled = 0
+        actions_removed = 0
+        nla_enabled = 0
+        
+        for obj in bpy.data.objects:
+            # Check if object has animation_data
+            ad = getattr(obj, 'animation_data', None)
+            if not ad:
+                continue
+            
+            try:
+                # Check for animation layers and disable them
+                # Try AnimLayersSettings first
+                anim_layers = getattr(obj, 'AnimLayersSettings', None)
+                if anim_layers is None:
+                    # Try shorthand alias
+                    anim_layers = getattr(obj, 'als', None)
+                
+                if anim_layers is not None:
+                    turn_on = getattr(anim_layers, 'turn_on', None)
+                    if turn_on is True:
+                        anim_layers.turn_on = False
+                        animation_layers_disabled += 1
+                
+                # Remove current action
+                if ad.action is not None:
+                    ad.action = None
+                    actions_removed += 1
+                
+                # Enable NLA
+                if hasattr(ad, 'use_nla'):
+                    if not ad.use_nla:
+                        ad.use_nla = True
+                        nla_enabled += 1
+                
+                objects_processed += 1
+                
+            except Exception as e:
+                # Continue processing other objects even if one fails
+                print(f"[SheepIt NLA] Warning: Could not process object '{obj.name}': {e}")
+                continue
+        
+        # Report results
+        if objects_processed > 0:
+            self.report({'INFO'}, 
+                f"Processed {objects_processed} objects: "
+                f"{animation_layers_disabled} animation layers disabled, "
+                f"{actions_removed} actions removed, "
+                f"{nla_enabled} NLA enabled")
+        else:
+            self.report({'INFO'}, "No objects with animation data found.")
+        
+        return {'FINISHED'}
+
+
 def register():
     """Register operators."""
     bpy.utils.register_class(SHEEPIT_OT_pack_zip)
     bpy.utils.register_class(SHEEPIT_OT_pack_blend)
+    bpy.utils.register_class(SHEEPIT_OT_enable_nla)
 
 
 def unregister():
     """Unregister operators."""
+    bpy.utils.unregister_class(SHEEPIT_OT_enable_nla)
     bpy.utils.unregister_class(SHEEPIT_OT_pack_blend)
     bpy.utils.unregister_class(SHEEPIT_OT_pack_zip)
