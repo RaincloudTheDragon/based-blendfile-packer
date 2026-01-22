@@ -1762,6 +1762,31 @@ class SHEEPIT_OT_pack_zip(Operator):
                             progress_callback=zip_progress_callback,
                             cancel_check=zip_cancel_check
                         )
+                        
+                        # Rename ZIP to use blend file name with pack indicator
+                        # Extract blend file name
+                        if self._original_filepath:
+                            blend_name = Path(self._original_filepath).stem
+                        elif self._temp_blend_path:
+                            blend_name = self._temp_blend_path.stem
+                        else:
+                            blend_name = "untitled"
+                        
+                        # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "sheepit_pack_0t2v99gf")
+                        pack_indicator = self._target_path.name
+                        if pack_indicator.startswith("sheepit_pack_"):
+                            pack_indicator = pack_indicator[len("sheepit_pack_"):]
+                        
+                        # Create new ZIP name: {blend_name}_{pack_indicator}.zip
+                        new_zip_name = f"{blend_name}_{pack_indicator}.zip"
+                        new_zip_path = self._zip_path.parent / new_zip_name
+                        
+                        # Rename the ZIP file
+                        if self._zip_path.exists():
+                            self._zip_path.rename(new_zip_path)
+                            self._zip_path = new_zip_path
+                            print(f"[SheepIt Pack] Renamed ZIP to: {new_zip_name}")
+                        
                         submit_settings.submit_progress = 80.0
                         submit_settings.submit_status_message = "ZIP archive created"
                         print(f"[SheepIt Pack] DEBUG: ZIP creation completed")
