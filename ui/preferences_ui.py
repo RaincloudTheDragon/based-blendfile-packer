@@ -5,6 +5,7 @@ Preferences UI for SheepIt Project Submitter.
 import sys
 import bpy
 from bpy.types import AddonPreferences
+from bpy.props import StringProperty
 from .. import config
 
 
@@ -43,14 +44,42 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
     # Get it dynamically to ensure it matches what Blender registered
     bl_idname = _get_addon_module_name()
     
+    default_output_path: StringProperty(
+        name="Default Output Path",
+        description="Default directory path where packed files will be saved",
+        default="",
+        subtype='DIR_PATH',
+        update=lambda self, context: _sync_default_output_path(self, context),
+    )
+    
     def draw(self, context):
         layout = self.layout
+        
+        # Output path settings
+        box = layout.box()
+        box.label(text="Output Settings:", icon='FILE_FOLDER')
+        box.prop(self, "default_output_path")
+        
+        layout.separator()
         
         # Info box
         box = layout.box()
         box.label(text="About:", icon='INFO')
         box.label(text="This addon packs your Blender projects for manual upload to SheepIt.")
         box.label(text="You must manually upload and configure projects on the SheepIt website.")
+
+
+def _sync_default_output_path(prefs, context):
+    """Sync default output path to all scenes' output_path if they're empty."""
+    if not prefs.default_output_path:
+        return
+    
+    # Update all scenes' output_path if they're empty
+    for scene in bpy.data.scenes:
+        if hasattr(scene, 'sheepit_submit') and scene.sheepit_submit:
+            if not scene.sheepit_submit.output_path:
+                scene.sheepit_submit.output_path = prefs.default_output_path
+
 
 reg_list = [SHEEPIT_AddonPreferences]
 

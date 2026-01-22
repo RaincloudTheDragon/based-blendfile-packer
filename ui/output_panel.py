@@ -21,6 +21,13 @@ class SHEEPIT_PT_output_panel(Panel):
         scene = context.scene
         submit_settings = scene.sheepit_submit
         
+        # Initialize output path from preferences if empty (only check once per draw)
+        if not submit_settings.output_path:
+            from ..utils.compat import get_addon_prefs
+            prefs = get_addon_prefs()
+            if prefs and prefs.default_output_path:
+                submit_settings.output_path = prefs.default_output_path
+        
         # Frame Range Section
         box = layout.box()
         box.label(text="Frame Range:", icon='RENDER_ANIMATION')
@@ -59,14 +66,13 @@ class SHEEPIT_PT_output_panel(Panel):
         # Pack as Blend button
         op = col.operator("sheepit.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
         
-        # Show pack output path if available (for debugging)
-        if submit_settings.pack_output_path:
-            layout.separator()
-            box = layout.box()
-            box.label(text="Last Packed Output:", icon='FILE_FOLDER')
-            row = box.row()
-            row.scale_x = 0.8
-            row.label(text=submit_settings.pack_output_path)
+        layout.separator()
+        
+        # Output Path Section
+        box = layout.box()
+        box.label(text="Output Path:", icon='FILE_FOLDER')
+        row = box.row()
+        row.prop(submit_settings, "output_path", text="")
 
 
 def register():

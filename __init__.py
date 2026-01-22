@@ -12,6 +12,15 @@ from . import ui
 from . import rainys_repo_bootstrap
 
 
+def _update_output_path(self, context):
+    """Update callback for output_path property - auto-populates from preferences if empty."""
+    if not self.output_path:
+        from .utils.compat import get_addon_prefs
+        prefs = get_addon_prefs()
+        if prefs and prefs.default_output_path:
+            self.output_path = prefs.default_output_path
+
+
 # SheepIt Submit Settings Property Group
 class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
     """Property group for storing submit settings."""
@@ -99,6 +108,14 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         description="Path where the packed file (ZIP or blend) will be saved",
         default="",
         subtype='FILE_PATH',
+    )
+    
+    output_path: bpy.props.StringProperty(
+        name="Output Path",
+        description="Directory path where packed files will be saved",
+        default="",
+        subtype='DIR_PATH',
+        update=_update_output_path,
     )
     
     # Progress tracking for submission operations

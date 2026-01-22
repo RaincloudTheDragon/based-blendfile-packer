@@ -103,15 +103,8 @@ class SHEEPIT_OT_submit_current(Operator):
     bl_description = "Save the current blend file with frame range applied to the specified output location"
     bl_options = {'REGISTER', 'UNDO'}
     
-    filepath: bpy.props.StringProperty(
-        name="Output File",
-        description="Path where the blend file will be saved",
-        default="",
-        subtype='FILE_PATH',
-    )
-    
     def invoke(self, context, event):
-        """Open file browser to select output location."""
+        """Start the packing operation."""
         submit_settings = context.scene.sheepit_submit
         
         # Check if already packing
@@ -119,15 +112,26 @@ class SHEEPIT_OT_submit_current(Operator):
             self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
-        # Set default filename
-        if not self.filepath:
-            blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
-            blend_name = Path(blend_name).stem if blend_name else "untitled"
-            self.filepath = f"{blend_name}.blend"
+        # Get output path from settings or preferences
+        output_dir = submit_settings.output_path
+        if not output_dir:
+            from ..utils.compat import get_addon_prefs
+            prefs = get_addon_prefs()
+            if prefs and prefs.default_output_path:
+                output_dir = prefs.default_output_path
+                submit_settings.output_path = output_dir
         
-        # Open file browser
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
+        if not output_dir:
+            self.report({'ERROR'}, "Please specify an output path in the panel below.")
+            return {'CANCELLED'}
+        
+        # Generate filename
+        blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
+        blend_name = Path(blend_name).stem if blend_name else "untitled"
+        output_file = Path(output_dir) / f"{blend_name}.blend"
+        
+        # Start the operation
+        return self.execute(context)
     
     def execute(self, context):
         """Execute the packing operation."""
@@ -138,6 +142,23 @@ class SHEEPIT_OT_submit_current(Operator):
             self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
+        # Get output path from settings or preferences
+        output_dir = submit_settings.output_path
+        if not output_dir:
+            from ..utils.compat import get_addon_prefs
+            prefs = get_addon_prefs()
+            if prefs and prefs.default_output_path:
+                output_dir = prefs.default_output_path
+        
+        if not output_dir:
+            self.report({'ERROR'}, "Please specify an output path in the panel below.")
+            return {'CANCELLED'}
+        
+        # Generate filename
+        blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
+        blend_name = Path(blend_name).stem if blend_name else "untitled"
+        output_file = Path(output_dir) / f"{blend_name}.blend"
+        
         # Initialize progress properties
         submit_settings.is_submitting = True
         submit_settings.submit_progress = 0.0
@@ -145,7 +166,7 @@ class SHEEPIT_OT_submit_current(Operator):
         
         # Initialize phase tracking
         self._phase = 'INIT'
-        self._output_path = Path(self.filepath)
+        self._output_path = output_file
         self._temp_blend_path = None
         self._temp_dir = None
         self._success = False
