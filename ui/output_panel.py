@@ -39,41 +39,6 @@ class SHEEPIT_PT_output_panel(Panel):
         
         layout.separator()
         
-        # Compute Method Section
-        box = layout.box()
-        box.label(text="Compute Method:", icon='SETTINGS')
-        row = box.row()
-        row.prop(submit_settings, "compute_method", expand=True)
-        
-        # Show queue info if available (placeholder for future API integration)
-        if submit_settings.compute_method == 'CPU':
-            row = box.row()
-            row.label(text="Est. queue position: 1st", icon='INFO')
-        else:
-            row = box.row()
-            row.label(text="Est. queue position: 1st", icon='INFO')
-        
-        layout.separator()
-        
-        # Options Section
-        box = layout.box()
-        box.label(text="Options:", icon='CHECKBOX_HLT')
-        box.prop(submit_settings, "renderable_by_all")
-        box.prop(submit_settings, "generate_mp4")
-        
-        layout.separator()
-        
-        # Advanced Options (collapsible)
-        box = layout.box()
-        row = box.row()
-        row.prop(submit_settings, "show_advanced", toggle=True, icon='TRIA_DOWN' if submit_settings.show_advanced else 'TRIA_RIGHT')
-        row.label(text="Advanced Options")
-        
-        if submit_settings.show_advanced:
-            box.prop(submit_settings, "memory_used_mb")
-        
-        layout.separator()
-        
         # Submission Buttons
         col = layout.column()
         col.scale_y = 1.5

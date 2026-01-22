@@ -9,6 +9,7 @@ from typing import Optional, Dict, Tuple
 import urllib.request
 import urllib.error
 import urllib.parse
+import webbrowser
 
 import bpy
 from .. import config
@@ -597,9 +598,8 @@ def submit_file_to_sheepit(
     # STEP 1: Upload file to /project/internal/upload
     # This is a two-step process:
     # 1. Upload file to /project/internal/upload (field: addproject_archive)
-    # 2. Extract token from redirect
-    # 3. Poll /project/add_analyse/{token} until analysis is complete
-    # 4. Submit metadata to /project/add_internal with token
+    # 2. Extract token from redirect URL
+    # 3. Open browser to project configuration page: /project/add/{token}
     
     print(f"[SheepIt API] Step 1: Uploading file to /project/internal/upload...")
     
@@ -807,331 +807,19 @@ def submit_file_to_sheepit(
                 token = token_match.group(1)
                 print(f"[SheepIt API] Extracted token: {token}")
                 
-                # STEP 2: Poll /project/add_analyse/{token} until analysis is complete
-                print(f"[SheepIt API] Step 2: Waiting for project analysis...")
-                # Use www subdomain to match where the upload happened
-                analyse_url = f"{config.SHEEPIT_API_BASE}/project/add_analyse/{token}"
+                # Open browser to project configuration page
+                project_url = f"{config.SHEEPIT_API_BASE}/project/add/{token}"
+                print(f"[SheepIt API] Opening project configuration page: {project_url}")
+                try:
+                    webbrowser.open(project_url)
+                    success_msg = f"File uploaded successfully! Opening project configuration page: {project_url}"
+                    print(f"[SheepIt API] SUCCESS: {success_msg}")
+                    return True, success_msg
+                except Exception as e:
+                    error_msg = f"File uploaded successfully, but failed to open browser: {str(e)}. Please visit: {project_url}"
+                    print(f"[SheepIt API] WARNING: {error_msg}")
+                    return True, error_msg
                 
-                import time
-                max_wait_time = 300  # 5 minutes max
-                poll_interval = 5  # Poll every 5 seconds
-                start_time = time.time()
-                analysis_complete = False
-                analysis_html = None
-                
-                while time.time() - start_time < max_wait_time:
-                    try:
-                        analyse_req = urllib.request.Request(analyse_url, headers=headers)
-                        if session_opener:
-                            analyse_response = session_opener.open(analyse_req, timeout=10)
-                        else:
-                            analyse_response = urllib.request.urlopen(analyse_req, timeout=10)
-                        
-                        with analyse_response:
-                            analyse_data = analyse_response.read().decode('utf-8', errors='ignore')
-                            
-                            # Check if it's JSON (still processing) or HTML (finished)
-                            try:
-                                import json
-                                analyse_json = json.loads(analyse_data)
-                                status = analyse_json.get('status', '')
-                                print(f"[SheepIt API] Analysis status: {status}")
-                                
-                                if status == 'RETRY':
-                                    print(f"[SheepIt API] Waiting for analyser to start...")
-                                elif status == 'PROCESSING':
-                                    analysed = analyse_json.get('analysed', 0)
-                                    total = analyse_json.get('total', 0)
-                                    print(f"[SheepIt API] Analysis in progress: {analysed}/{total} blend files")
-                                else:
-                                    print(f"[SheepIt API] Unexpected analysis status: {status}")
-                            except json.JSONDecodeError:
-                                # Not JSON - must be HTML (analysis finished)
-                                analysis_complete = True
-                                analysis_html = analyse_data
-                                print(f"[SheepIt API] Analysis complete! Received HTML response")
-                                break
-                        
-                        time.sleep(poll_interval)
-                    except urllib.error.HTTPError as e:
-                        # Check if it's a 404 (token not found) or other HTTP error
-                        if e.code == 404:
-                            error_msg = f"Analysis endpoint returned 404 - token '{token}' may be invalid or expired"
-                            print(f"[SheepIt API] ERROR: {error_msg}")
-                            return False, error_msg
-                        elif e.code in (401, 403):
-                            error_msg = f"Analysis endpoint returned {e.code} - authentication may have expired"
-                            print(f"[SheepIt API] ERROR: {error_msg}")
-                            return False, error_msg
-                        else:
-                            print(f"[SheepIt API] HTTP Error {e.code} while polling analysis: {str(e)}")
-                            # Continue polling - might be a temporary server error
-                            time.sleep(poll_interval)
-                    except Exception as e:
-                        print(f"[SheepIt API] Error polling analysis: {type(e).__name__}: {str(e)}")
-                        # Continue polling - might be a temporary network error
-                        time.sleep(poll_interval)
-                
-                if not analysis_complete:
-                    error_msg = "Analysis timed out after 5 minutes"
-                    print(f"[SheepIt API] ERROR: {error_msg}")
-                    return False, error_msg
-                
-                # STEP 3: Parse analysis HTML to extract project metadata
-                # The analysis HTML contains hidden form fields with project data
-                print(f"[SheepIt API] Step 3: Parsing analysis results...")
-                
-                # Extract values from analysis HTML (these are in hidden input fields)
-                # We need: path, framerate, output_path, width, height, archive, and other fields
-                analysis_values = {}
-                
-                # Extract hidden input values
-                hidden_inputs = re.findall(r'<input[^>]*type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']', analysis_html, re.IGNORECASE)
-                for name, value in hidden_inputs:
-                    analysis_values[name] = value
-                    print(f"[SheepIt API] Found analysis value: {name} = {value[:100] if len(value) > 100 else value}")
-                
-                # Also try to extract from JavaScript variables or other patterns
-                # The analysis page might have these in different formats
-                
-                # STEP 4: Submit metadata to /project/add_internal
-                print(f"[SheepIt API] Step 4: Submitting project metadata...")
-                
-                # Prepare metadata fields (required by controller)
-                # Get frame range from submit_settings
-                frame_start = submit_settings.frame_start if hasattr(submit_settings, 'frame_start') else bpy.context.scene.frame_start
-                frame_end = submit_settings.frame_end if hasattr(submit_settings, 'frame_end') else bpy.context.scene.frame_end
-                frame_step = submit_settings.frame_step if hasattr(submit_settings, 'frame_step') else bpy.context.scene.frame_step
-                
-                # Determine project type
-                project_type = 'animation' if frame_end > frame_start else 'singleframe'
-                
-                # Convert compute_method to numeric (1 = CPU, 8 = GPU, 9 = both)
-                compute_method_numeric = 0
-                if submit_settings.compute_method == 'CPU':
-                    compute_method_numeric = 1
-                elif submit_settings.compute_method == 'GPU':
-                    compute_method_numeric = 8
-                
-                # Get Blender version and engine
-                # Use the executable from analysis page (e.g., "blender500") if available
-                # Otherwise fall back to constructing from version (e.g., "5.0" -> "blender500")
-                executable_from_analysis = analysis_values.get('addproject_exe_0')
-                if executable_from_analysis:
-                    executable = executable_from_analysis
-                    print(f"[SheepIt API] Using executable from analysis: {executable}")
-                else:
-                    # Fallback: construct executable name from Blender version
-                    blender_version = f"{bpy.app.version[0]}.{bpy.app.version[1]}"
-                    # Convert "5.0" to "blender500" format
-                    major, minor = bpy.app.version[0], bpy.app.version[1]
-                    executable = f"blender{major}{minor:01d}0"  # e.g., 5.0 -> blender500
-                    print(f"[SheepIt API] Constructed executable from version: {executable} (from version {major}.{minor})")
-                
-                render_engine = bpy.context.scene.render.engine
-                
-                # Build metadata form data (URL-encoded, not multipart)
-                metadata_fields = {
-                    'token': token,
-                    'type': project_type,
-                    'start_frame': str(frame_start),
-                    'end_frame': str(frame_end),
-                    'step_frame': str(frame_step),
-                    'compute_method': str(compute_method_numeric),
-                    'executable': executable,
-                    'engine': render_engine,
-                    'public_render': '1' if (hasattr(submit_settings, 'renderable_by_all') and submit_settings.renderable_by_all) else '0',
-                    'public_thumbnail': '1',  # Default
-                    'generate_mp4': '1' if (hasattr(submit_settings, 'generate_mp4') and submit_settings.generate_mp4) else '0',
-                    'denoising': '0',  # Default
-                    'render_on_gpu_headless': '0',  # Default
-                    'split_tiles': '1',  # Default
-                    'cycles_samples': '0',  # Default
-                    'samples_pixel': '0',  # Default
-                    'use_adaptive_sampling': '0',  # Default
-                    'image_extension': '.png',  # Default
-                    'archive': analysis_values.get('addproject_archive', file_path.name),
-                    'path': analysis_values.get('addproject_path', ''),
-                    'framerate': analysis_values.get('addproject_framerate', '24'),
-                    'output_path': analysis_values.get('addproject_output_path', ''),
-                    'width': analysis_values.get('addproject_width', str(bpy.context.scene.render.resolution_x)),
-                    'height': analysis_values.get('addproject_height', str(bpy.context.scene.render.resolution_y)),
-                }
-                
-                # Add optional memory setting
-                if hasattr(submit_settings, 'memory_used_mb') and submit_settings.memory_used_mb:
-                    metadata_fields['max_ram_optional'] = str(submit_settings.memory_used_mb)
-                
-                # Add color_management if found
-                if 'addproject_color_management' in analysis_values:
-                    metadata_fields['color_management'] = analysis_values['addproject_color_management']
-                
-                print(f"[SheepIt API] Metadata fields: {list(metadata_fields.keys())}")
-                
-                # Extract additional fields from analysis if available
-                # Use analysis values when present, otherwise keep defaults
-                for field_name, analysis_key in [
-                    ('denoising', 'addproject_denoising_0'),
-                    ('render_on_gpu_headless', 'addproject_render_on_gpu_headless_0'),
-                    ('cycles_samples', 'addproject_cycles_samples_0'),
-                    ('samples_pixel', 'addproject_samples_pixel_0'),
-                    ('use_adaptive_sampling', 'addproject_use_adaptive_sampling_0'),
-                    ('image_extension', 'addproject_image_extension_0'),
-                ]:
-                    if analysis_key in analysis_values and analysis_values[analysis_key]:
-                        metadata_fields[field_name] = analysis_values[analysis_key]
-                        print(f"[SheepIt API] Using {field_name} from analysis: {analysis_values[analysis_key]}")
-                
-                # Handle split_tiles specially - only send if it has a value
-                if 'addproject_split_tiles_number_0' in analysis_values:
-                    split_tiles_val = analysis_values['addproject_split_tiles_number_0']
-                    if split_tiles_val and split_tiles_val.strip():
-                        metadata_fields['split_tiles'] = split_tiles_val
-                        print(f"[SheepIt API] Using split_tiles from analysis: {split_tiles_val}")
-                    else:
-                        # Remove split_tiles if empty (don't send it)
-                        metadata_fields.pop('split_tiles', None)
-                        print(f"[SheepIt API] Removed split_tiles (empty in analysis)")
-                
-                # Log final metadata for debugging
-                print(f"[SheepIt API] Final metadata fields ({len(metadata_fields)}): {list(metadata_fields.keys())}")
-                for key, value in metadata_fields.items():
-                    value_preview = str(value)[:50] if len(str(value)) > 50 else str(value)
-                    print(f"[SheepIt API]   {key} = {value_preview}")
-                
-                # Submit metadata
-                # Use www subdomain to match where the upload and form page are (consistent with manual browser submission)
-                submit_url = f"{config.SHEEPIT_API_BASE}/project/add_internal"
-                metadata_data = urllib.parse.urlencode(metadata_fields).encode('utf-8')
-                print(f"[SheepIt API] POST data length: {len(metadata_data)} bytes")
-                
-                submit_headers = headers.copy()
-                submit_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-                submit_headers['Referer'] = f"{config.SHEEPIT_API_BASE}/project/add/{token}"
-                submit_headers['Origin'] = config.SHEEPIT_API_BASE
-                
-                submit_req = urllib.request.Request(submit_url, data=metadata_data, headers=submit_headers, method='POST')
-                
-                if session_opener:
-                    submit_response = session_opener.open(submit_req, timeout=60)
-                else:
-                    submit_response = urllib.request.urlopen(submit_req, timeout=60)
-                
-                with submit_response:
-                    submit_data = submit_response.read().decode('utf-8', errors='ignore')
-                    submit_final_url = submit_response.geturl()
-                    submit_status = submit_response.status
-                    
-                    print(f"[SheepIt API] Submit response status: {submit_status}")
-                    print(f"[SheepIt API] Submit final URL: {submit_final_url}")
-                    print(f"[SheepIt API] Submit response: {submit_data[:1000]}")
-                    
-                    # Check for success indicators FIRST (redirect URL or project ID)
-                    # A successful submission returns a URL like: http://www.sheepit-renderfarm.com/project/{id}
-                    if submit_data.startswith('http'):
-                        # Response is a redirect URL - this indicates success
-                        project_id_match = re.search(r'/project/(\d+)', submit_data)
-                        if project_id_match:
-                            project_id = project_id_match.group(1)
-                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
-                        else:
-                            success_msg = f"Project submitted successfully! URL: {submit_data.strip()}"
-                        print(f"[SheepIt API] SUCCESS: {success_msg}")
-                        return True, success_msg
-                    elif '/project/' in submit_final_url and 'add_internal' not in submit_final_url:
-                        # Redirected to a project page (not the add_internal endpoint)
-                        project_id_match = re.search(r'/project/(\d+)', submit_final_url)
-                        if project_id_match:
-                            project_id = project_id_match.group(1)
-                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
-                        else:
-                            success_msg = f"Project submitted successfully! URL: {submit_final_url}"
-                        print(f"[SheepIt API] SUCCESS: {success_msg}")
-                        return True, success_msg
-                    
-                    # Check for errors (but only if we didn't find success indicators above)
-                    # Some error messages may appear even when the project is created
-                    # So we prioritize success indicators (redirect URLs) over error messages
-                    if '<p class="error">' in submit_data:
-                        # Check if the error is just a warning (Blender version warning might not prevent creation)
-                        # If we have a valid token, the project was likely created despite the warning
-                        if 'blender version' in submit_data.lower() or 'not supported' in submit_data.lower():
-                            # This might be a warning, not a fatal error
-                            # Check if we can find a project ID or redirect in the response
-                            project_id_match = re.search(r'/project/(\d+)', submit_data)
-                            if project_id_match:
-                                project_id = project_id_match.group(1)
-                                success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning may appear but project was created)"
-                                print(f"[SheepIt API] SUCCESS: {success_msg}")
-                                return True, success_msg
-                            
-                            # Check if we were redirected to a project page (even if response body has error)
-                            if '/project/' in submit_final_url and 'add_internal' not in submit_final_url and 'add/' not in submit_final_url:
-                                project_id_match = re.search(r'/project/(\d+)', submit_final_url)
-                                if project_id_match:
-                                    project_id = project_id_match.group(1)
-                                    success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning appeared but project was created)"
-                                    print(f"[SheepIt API] SUCCESS: {success_msg}")
-                                    return True, success_msg
-                            
-                            # If no project ID in response or redirect, verify project exists by checking the token page
-                            # A valid token means the project was created, even if the response shows a warning
-                            print(f"[SheepIt API] Blender version warning detected. Verifying project exists with token '{token}'...")
-                            try:
-                                # Use www subdomain to match where the upload happened
-                                verify_url = f"{config.SHEEPIT_API_BASE}/project/add/{token}"
-                                verify_req = urllib.request.Request(verify_url, headers=headers)
-                                if session_opener:
-                                    verify_response = session_opener.open(verify_req, timeout=10)
-                                else:
-                                    verify_response = urllib.request.urlopen(verify_req, timeout=10)
-                                
-                                with verify_response:
-                                    verify_data = verify_response.read().decode('utf-8', errors='ignore')
-                                    # If we can access the project page (not a 404), the project exists
-                                    if verify_response.status == 200 and 'project' in verify_data.lower():
-                                        # Try to extract project ID from the verification page
-                                        verify_project_id_match = re.search(r'/project/(\d+)', verify_data)
-                                        if verify_project_id_match:
-                                            project_id = verify_project_id_match.group(1)
-                                            success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning appeared but project was created)"
-                                        else:
-                                            # Project exists but we can't extract ID - still a success
-                                            success_msg = f"Project submitted successfully with token '{token}'! (Note: Blender version warning appeared but project was created)"
-                                        print(f"[SheepIt API] SUCCESS: {success_msg}")
-                                        return True, success_msg
-                                    else:
-                                        print(f"[SheepIt API] Verification failed: status={verify_response.status}")
-                            except Exception as e:
-                                print(f"[SheepIt API] Could not verify project existence: {type(e).__name__}: {str(e)}")
-                                # If verification fails, assume the warning is just a warning and project was created
-                                # (since the user confirmed the token is valid)
-                                success_msg = f"Project submitted successfully with token '{token}'! (Note: Blender version warning appeared - project may have been created despite warning)"
-                                print(f"[SheepIt API] SUCCESS (assumed): {success_msg}")
-                                return True, success_msg
-                        
-                        # Fatal error - no success indicators found
-                        error_msg = f"Submission failed: {submit_data[:500]}"
-                        print(f"[SheepIt API] ERROR: {error_msg}")
-                        return False, error_msg
-                    elif 'error' in submit_data.lower() or 'failed' in submit_data.lower():
-                        # Generic error - but check if there's also a success indicator
-                        project_id_match = re.search(r'/project/(\d+)', submit_data)
-                        if project_id_match:
-                            project_id = project_id_match.group(1)
-                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
-                            print(f"[SheepIt API] SUCCESS: {success_msg}")
-                            return True, success_msg
-                        
-                        error_msg = f"Submission failed: {submit_data[:500]}"
-                        print(f"[SheepIt API] ERROR: {error_msg}")
-                        return False, error_msg
-                    else:
-                        # Unknown response
-                        error_msg = f"Unclear response: {submit_data[:500]}"
-                        print(f"[SheepIt API] WARNING: {error_msg}")
-                        return False, error_msg
-                        
         except urllib.error.HTTPError as e:
             error_body = ""
             try:
