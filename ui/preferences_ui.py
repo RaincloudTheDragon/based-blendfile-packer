@@ -50,9 +50,7 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         box = layout.box()
         box.label(text="About:", icon='INFO')
         box.label(text="This addon packs your Blender projects for manual upload to SheepIt.")
-        box.label(text="All website functionality has been removed per SheepIt developer request.")
         box.label(text="You must manually upload and configure projects on the SheepIt website.")
-
 
 reg_list = [SHEEPIT_AddonPreferences]
 
