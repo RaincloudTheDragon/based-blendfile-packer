@@ -2,7 +2,6 @@
 SheepIt Project Submitter Addon
 
 A Blender addon for submitting projects to SheepIt render farm with automatic asset packing.
-Based on Dr. Sybren's Batter (Bat v2.0) project.
 """
 
 import bpy

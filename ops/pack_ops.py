@@ -1,6 +1,5 @@
 """
 Packing operations for SheepIt Project Submitter.
-Based on pack.py from Dr. Sybren's Batter project.
 """
 
 import os
