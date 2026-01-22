@@ -1815,15 +1815,31 @@ class SHEEPIT_OT_pack_zip(Operator):
                             self.report({'ERROR'}, self._error)
                             return {'CANCELLED'}
                     
+                    self._phase = 'UPLOADING_INIT'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'UPLOADING_INIT':
+                    # Set status and force UI update before blocking upload
+                    submit_settings.submit_progress = 87.0
+                    submit_settings.submit_status_message = "Uploading to SheepIt..."
+                    
+                    # Force UI redraw to show the status update
+                    for area in context.screen.areas:
+                        if area.type == 'PROPERTIES':
+                            area.tag_redraw()
+                    
+                    # Process events to allow UI to update
+                    bpy.app.timers.register(lambda: None)
+                    
+                    print(f"[SheepIt Pack] DEBUG: Status set to 'Uploading to SheepIt...', transitioning to UPLOADING phase")
                     self._phase = 'UPLOADING'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'UPLOADING':
-                    submit_settings.submit_progress = 87.0
-                    submit_settings.submit_status_message = "Uploading to SheepIt..."
-                    
+                    # Now do the actual blocking upload
                     from .api_submit import submit_file_to_sheepit
                     
+                    print(f"[SheepIt Pack] DEBUG: Starting blocking upload operation...")
                     self._success, self._message = submit_file_to_sheepit(
                         self._zip_path,
                         context.scene.sheepit_submit,
@@ -2231,15 +2247,31 @@ class SHEEPIT_OT_pack_blend(Operator):
                         self._username = sheepit_prefs.sheepit_username
                         self._password = sheepit_prefs.sheepit_password
                     
+                    self._phase = 'UPLOADING_INIT'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'UPLOADING_INIT':
+                    # Set status and force UI update before blocking upload
+                    submit_settings.submit_progress = 77.0
+                    submit_settings.submit_status_message = "Uploading to SheepIt..."
+                    
+                    # Force UI redraw to show the status update
+                    for area in context.screen.areas:
+                        if area.type == 'PROPERTIES':
+                            area.tag_redraw()
+                    
+                    # Process events to allow UI to update
+                    bpy.app.timers.register(lambda: None)
+                    
+                    print(f"[SheepIt Pack] DEBUG: Status set to 'Uploading to SheepIt...', transitioning to UPLOADING phase")
                     self._phase = 'UPLOADING'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'UPLOADING':
-                    submit_settings.submit_progress = 77.0
-                    submit_settings.submit_status_message = "Uploading to SheepIt..."
-                    
+                    # Now do the actual blocking upload
                     from .api_submit import submit_file_to_sheepit
                     
+                    print(f"[SheepIt Pack] DEBUG: Starting blocking upload operation...")
                     self._success, self._message = submit_file_to_sheepit(
                         self._blend_path,
                         context.scene.sheepit_submit,
