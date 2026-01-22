@@ -94,6 +94,13 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         default="",
     )
     
+    output_file_path: bpy.props.StringProperty(
+        name="Output File Path",
+        description="Path where the packed file (ZIP or blend) will be saved",
+        default="",
+        subtype='FILE_PATH',
+    )
+    
     # Progress tracking for submission operations
     is_submitting: bpy.props.BoolProperty(
         name="Is Submitting",

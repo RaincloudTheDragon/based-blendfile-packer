@@ -1,16 +1,16 @@
 # SheepIt Project Submitter
 
-A Blender addon for submitting projects to the SheepIt render farm with automatic asset packing and intelligent workflow management.
+A Blender addon for packing projects for the SheepIt render farm with automatic asset packing and intelligent workflow management.
 
 ## Features
 
-| Automatic Asset Packing | Frame Range Control | Multiple Submission Methods |
+| Automatic Asset Packing | Frame Range Control | Multiple Packing Methods |
 |--|--|--|
-| Automatically packs all linked blend files, textures, images, and external assets into your submission. Supports both ZIP and packed blend file workflows. | Configure custom frame ranges directly in Blender without saving your file. Frame ranges are automatically applied to submissions. | Submit as current blend file, packed ZIP archive, or packed blend file. Choose the method that best fits your project. |
+| Automatically packs all linked blend files, textures, images, and external assets into your project. Supports both ZIP and packed blend file workflows. | Configure custom frame ranges directly in Blender without saving your file. Frame ranges are automatically applied to packed files. | Pack as current blend file, packed ZIP archive, or packed blend file. Choose the method that best fits your project. |
 
 | Cache Management | Size Validation | Progress Tracking |
 |--|--|--|
-| Automatically truncates cache files to match your selected frame range, reducing file sizes significantly. | Validates file sizes before submission (2GB limit) with helpful suggestions for optimization. | Real-time progress bars and status messages for all operations. All steps are cancellable. |
+| Automatically truncates cache files to match your selected frame range, reducing file sizes significantly. | Validates file sizes before packing (2GB limit) with helpful suggestions for optimization. | Real-time progress bars and status messages for all operations. All steps are cancellable. |
 
 | Path Remapping | Missing File Detection | Error Reporting |
 |--|--|--|
@@ -20,8 +20,7 @@ A Blender addon for submitting projects to the SheepIt render farm with automati
 - Works with unsaved blend files (operates on in-memory state)
 - Automatic backup file cleanup (`.blend1` through `.blend32`)
 - Compressed blend file saves for optimal file sizes
-- Username/password authentication
-- Automatic browser redirect to project configuration page after submission
+- File browser for selecting output location
 
 ## Installation
 
@@ -32,19 +31,17 @@ A Blender addon for submitting projects to the SheepIt render farm with automati
 
 ## Usage
 
-1. **Configure Settings**: Go to `Edit > Preferences > Add-ons > SheepIt Project Submitter` and enter your SheepIt username and password
-2. **Set Frame Range**: In the Output properties panel, configure your frame range (full range or custom)
-3. **Submit**: Choose your submission method:
-   - **Submit Current**: Submits the current blend file as-is
-   - **Submit as ZIP**: Packs all assets and creates a ZIP archive
-   - **Submit as Packed Blend**: Packs all assets directly into the blend file
-4. **Configure Project**: After submission, you'll be redirected to the SheepIt project configuration page to set up render settings
+1. **Set Frame Range**: In the Output properties panel, configure your frame range (full range or custom)
+2. **Pack Project**: Choose your packing method:
+   - **Pack Current Blend**: Saves the current blend file with frame range applied
+   - **Pack as ZIP**: Packs all assets and creates a ZIP archive (recommended for scenes with caches)
+   - **Pack as Blend**: Packs all assets directly into the blend file
+3. **Select Output Location**: A file browser will open to select where to save the packed file
+4. **Upload Manually**: Upload the packed file to SheepIt via the website and configure your project settings
 
 ## Requirements
 
 - Blender 3.0.0 or later
-- Active SheepIt render farm account
-- Internet connection for submission
 
 ## License
 

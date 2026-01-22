@@ -1454,22 +1454,45 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
 
 
 class SHEEPIT_OT_pack_zip(Operator):
-    """Pack project as ZIP (for scenes with caches) - creates ZIP and submits to SheepIt."""
+    """Pack project as ZIP (for scenes with caches) - creates ZIP and saves to output location."""
     bl_idname = "sheepit.pack_zip"
-    bl_label = "Submit as ZIP"
-    bl_description = "Copy assets without packing (for scenes with caches), create ZIP, and submit to SheepIt"
+    bl_label = "Pack as ZIP"
+    bl_description = "Copy assets without packing (for scenes with caches), create ZIP, and save to output location"
     bl_options = {'REGISTER', 'UNDO'}
     
+    filepath: bpy.props.StringProperty(
+        name="Output ZIP File",
+        description="Path where the ZIP file will be saved",
+        default="",
+        subtype='FILE_PATH',
+    )
+    
     def invoke(self, context, event):
-        """Initialize modal operator with timer."""
+        """Open file browser to select output location."""
         submit_settings = context.scene.sheepit_submit
         
-        print(f"[SheepIt Pack] DEBUG: SHEEPIT_OT_pack_zip.invoke called")
-        
-        # Check if already submitting
+        # Check if already packing
         if submit_settings.is_submitting:
-            print(f"[SheepIt Pack] DEBUG: Already submitting, cancelling")
-            self.report({'WARNING'}, "A submission is already in progress.")
+            self.report({'WARNING'}, "A packing operation is already in progress.")
+            return {'CANCELLED'}
+        
+        # Set default filename
+        if not self.filepath:
+            blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
+            blend_name = Path(blend_name).stem if blend_name else "untitled"
+            self.filepath = f"{blend_name}.zip"
+        
+        # Open file browser
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        """Execute the packing operation."""
+        submit_settings = context.scene.sheepit_submit
+        
+        # Check if already packing
+        if submit_settings.is_submitting:
+            self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
         # Initialize progress properties
@@ -1479,6 +1502,7 @@ class SHEEPIT_OT_pack_zip(Operator):
         
         # Initialize phase tracking
         self._phase = 'INIT'
+        self._output_path = Path(self.filepath)
         self._original_filepath = bpy.data.filepath
         self._temp_blend_path = None
         self._temp_dir = None
@@ -1487,19 +1511,13 @@ class SHEEPIT_OT_pack_zip(Operator):
         self._frame_start = None
         self._frame_end = None
         self._frame_step = None
-        self._auth_cookies = None
-        self._username = None
-        self._password = None
         self._success = False
         self._message = ""
         self._error = None
         self._packer = None  # IncrementalPacker instance
         
-        print(f"[SheepIt Pack] DEBUG: Initialized with original_filepath: {self._original_filepath}")
-        
         # Create timer for modal updates
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
-        print(f"[SheepIt Pack] DEBUG: Timer created: {self._timer}")
         
         # Force UI redraw
         for area in context.screen.areas:
@@ -1508,7 +1526,6 @@ class SHEEPIT_OT_pack_zip(Operator):
         
         # Start modal operation
         context.window_manager.modal_handler_add(self)
-        print(f"[SheepIt Pack] DEBUG: Modal handler added, returning RUNNING_MODAL")
         return {'RUNNING_MODAL'}
     
     def modal(self, context, event):
@@ -1523,7 +1540,7 @@ class SHEEPIT_OT_pack_zip(Operator):
         if event.type == 'ESC':
             print(f"[SheepIt Pack] DEBUG: ESC key pressed, cancelling")
             self._cleanup(context, cancelled=True)
-            self.report({'INFO'}, "Submission cancelled.")
+            self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
         
         # Handle timer events
@@ -1888,120 +1905,35 @@ class SHEEPIT_OT_pack_zip(Operator):
                             self.report({'ERROR'}, self._error)
                             return {'CANCELLED'}
                     
-                    self._phase = 'AUTHENTICATING'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to AUTHENTICATING phase")
+                    self._phase = 'SAVING_FILE'
+                    print(f"[SheepIt Pack] DEBUG: Transitioning to SAVING_FILE phase")
                     return {'RUNNING_MODAL'}
                 
-                elif self._phase == 'AUTHENTICATING':
+                elif self._phase == 'SAVING_FILE':
                     submit_settings.submit_progress = 85.0
-                    submit_settings.submit_status_message = "Authenticating..."
+                    submit_settings.submit_status_message = "Saving ZIP to output location..."
                     
-                    from ..utils.compat import get_addon_prefs
-                    # from ..utils.auth import load_auth_cookies  # Browser login commented out - using username/password only
-                    
-                    sheepit_prefs = get_addon_prefs()
-                    if not sheepit_prefs:
-                        self._error = "Addon preferences not found. Please configure SheepIt credentials in preferences."
-                        self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
-                        return {'CANCELLED'}
-                    
-                    # Get authentication - always use username/password (browser login commented out)
-                    # if sheepit_prefs.use_browser_login:
-                    #     self._auth_cookies = load_auth_cookies()
-                    #     if not self._auth_cookies:
-                    #         self._error = "No browser login session found. Please login via browser in preferences."
-                    #         self._cleanup(context, cancelled=True)
-                    #         self.report({'ERROR'}, self._error)
-                    #         return {'CANCELLED'}
-                    # else:
-                    if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
-                        self._error = "Please configure SheepIt username and password in preferences."
-                        self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
-                        return {'CANCELLED'}
-                    self._username = sheepit_prefs.sheepit_username
-                    self._password = sheepit_prefs.sheepit_password
-                    
-                    self._phase = 'VALIDATING_FILE_SIZE_UPLOAD'
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'VALIDATING_FILE_SIZE_UPLOAD':
-                    submit_settings.submit_progress = 81.0
-                    submit_settings.submit_status_message = "Validating file size before upload..."
-                    
-                    # File size validation is also done in submit_file_to_sheepit, but we check here for better UX
-                    if self._zip_path and self._zip_path.exists():
-                        zip_size = self._zip_path.stat().st_size
-                        zip_size_gb = zip_size / (1024 * 1024 * 1024)
-                        MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+                    try:
+                        # Ensure output directory exists
+                        self._output_path.parent.mkdir(parents=True, exist_ok=True)
                         
-                        if zip_size > MAX_FILE_SIZE:
-                            error_msg = (
-                                f"ZIP size ({zip_size_gb:.2f} GB) exceeds 2GB limit. Cannot submit.\n\n"
-                                "To reduce file size, consider:\n"
-                                "- Optimizing the scene (reduce geometry, simplify materials)\n"
-                                "- Optimizing asset files (compress textures, reduce resolution)\n"
-                                "- Splitting the frame range (render in smaller chunks)\n"
-                                "- Truncating caches to match your selected frame range\n"
-                                "  (Note: Caches are automatically truncated to your selected frame range during packing)"
-                            )
-                            print(f"[SheepIt Pack] ERROR: {error_msg}")
-                            self._error = error_msg
-                            self._cleanup(context, cancelled=True)
-                            self.report({'ERROR'}, self._error)
-                            return {'CANCELLED'}
-                    
-                    self._phase = 'UPLOADING_INIT'
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'UPLOADING_INIT':
-                    # Set status and force UI update before blocking upload
-                    submit_settings.submit_progress = 87.0
-                    submit_settings.submit_status_message = "Uploading to SheepIt..."
-                    
-                    # Force UI redraw to show the status update
-                    for area in context.screen.areas:
-                        if area.type == 'PROPERTIES':
-                            area.tag_redraw()
-                    
-                    # Process events to allow UI to update
-                    bpy.app.timers.register(lambda: None)
-                    
-                    print(f"[SheepIt Pack] DEBUG: Status set to 'Uploading to SheepIt...', transitioning to UPLOADING phase")
-                    self._phase = 'UPLOADING'
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'UPLOADING':
-                    # Now do the actual blocking upload
-                    from .api_submit import submit_file_to_sheepit
-                    
-                    print(f"[SheepIt Pack] DEBUG: Starting blocking upload operation...")
-                    self._success, self._message = submit_file_to_sheepit(
-                        self._zip_path,
-                        context.scene.sheepit_submit,
-                        auth_cookies=self._auth_cookies,
-                        username=self._username,
-                        password=self._password
-                    )
-                    
-                    if self._success:
+                        # Copy ZIP file to output location
+                        import shutil
+                        shutil.copy2(self._zip_path, self._output_path)
+                        
+                        print(f"[SheepIt Pack] Saved ZIP file to: {self._output_path}")
+                        self._success = True
+                        self._message = f"ZIP file saved to: {self._output_path}"
+                        
                         submit_settings.submit_progress = 95.0
-                        submit_settings.submit_status_message = "Upload complete!"
-                        self._phase = 'OPENING_BROWSER'
-                    else:
-                        self._error = self._message
+                        submit_settings.submit_status_message = "File saved successfully!"
+                        self._phase = 'CLEANUP'
+                    except Exception as e:
+                        self._error = f"Failed to save file: {str(e)}"
                         self._cleanup(context, cancelled=True)
                         self.report({'ERROR'}, self._error)
                         return {'CANCELLED'}
                     
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'OPENING_BROWSER':
-                    submit_settings.submit_progress = 97.0
-                    submit_settings.submit_status_message = "Opening browser..."
-                    # Browser is already opened by submit_file_to_sheepit
-                    self._phase = 'CLEANUP'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CLEANUP':
@@ -2026,14 +1958,14 @@ class SHEEPIT_OT_pack_zip(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     submit_settings.submit_progress = 100.0
-                    submit_settings.submit_status_message = "Submission complete!"
+                    submit_settings.submit_status_message = "Packing complete!"
                     
                     # Small delay to show completion
                     import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, self._message)
+                    self.report({'INFO'}, f"ZIP file saved to: {self._output_path}")
                     return {'FINISHED'}
                 
             except Exception as e:
@@ -2083,19 +2015,45 @@ class SHEEPIT_OT_pack_zip(Operator):
 
 
 class SHEEPIT_OT_pack_blend(Operator):
-    """Pack project and save (pack all assets into blend files) - submits blend to SheepIt."""
+    """Pack project and save (pack all assets into blend files) - saves blend to output location."""
     bl_idname = "sheepit.pack_blend"
-    bl_label = "Submit as Blend"
-    bl_description = "Pack all assets into blend files and submit to SheepIt"
+    bl_label = "Pack as Blend"
+    bl_description = "Pack all assets into blend files and save to output location"
     bl_options = {'REGISTER', 'UNDO'}
     
+    filepath: bpy.props.StringProperty(
+        name="Output Blend File",
+        description="Path where the packed blend file will be saved",
+        default="",
+        subtype='FILE_PATH',
+    )
+    
     def invoke(self, context, event):
-        """Initialize modal operator with timer."""
+        """Open file browser to select output location."""
         submit_settings = context.scene.sheepit_submit
         
-        # Check if already submitting
+        # Check if already packing
         if submit_settings.is_submitting:
-            self.report({'WARNING'}, "A submission is already in progress.")
+            self.report({'WARNING'}, "A packing operation is already in progress.")
+            return {'CANCELLED'}
+        
+        # Set default filename
+        if not self.filepath:
+            blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
+            blend_name = Path(blend_name).stem if blend_name else "untitled"
+            self.filepath = f"{blend_name}_packed.blend"
+        
+        # Open file browser
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        """Execute the packing operation."""
+        submit_settings = context.scene.sheepit_submit
+        
+        # Check if already packing
+        if submit_settings.is_submitting:
+            self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
         # Initialize progress properties
@@ -2105,6 +2063,7 @@ class SHEEPIT_OT_pack_blend(Operator):
         
         # Initialize phase tracking
         self._phase = 'INIT'
+        self._output_path = Path(self.filepath)
         self._original_filepath = bpy.data.filepath
         self._temp_blend_path = None
         self._temp_dir = None
@@ -2113,9 +2072,6 @@ class SHEEPIT_OT_pack_blend(Operator):
         self._frame_start = None
         self._frame_end = None
         self._frame_step = None
-        self._auth_cookies = None
-        self._username = None
-        self._password = None
         self._success = False
         self._message = ""
         self._error = None
@@ -2140,7 +2096,7 @@ class SHEEPIT_OT_pack_blend(Operator):
         # Handle ESC key to cancel
         if event.type == 'ESC':
             self._cleanup(context, cancelled=True)
-            self.report({'INFO'}, "Submission cancelled.")
+            self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
         
         # Handle timer events
@@ -2324,7 +2280,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                 
                 elif self._phase == 'VALIDATING_FILE_SIZE':
                     submit_settings.submit_progress = 72.5
-                    submit_settings.submit_status_message = "Validating file size before upload..."
+                    submit_settings.submit_status_message = "Validating file size..."
                     
                     # Check blend file size
                     if self._blend_path and self._blend_path.exists():
@@ -2336,13 +2292,11 @@ class SHEEPIT_OT_pack_blend(Operator):
                         
                         if blend_size > MAX_FILE_SIZE:
                             error_msg = (
-                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds 2GB limit. Cannot submit.\n\n"
+                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds 2GB limit.\n\n"
                                 "To reduce file size, consider:\n"
                                 "- Optimizing the scene (reduce geometry, simplify materials)\n"
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"
-                                "- Splitting the frame range (render in smaller chunks)\n"
-                                "- Truncating caches to match your selected frame range\n"
-                                "  (Note: Caches are automatically truncated to your selected frame range during packing)"
+                                "- Splitting the frame range (render in smaller chunks)"
                             )
                             print(f"[SheepIt Pack] ERROR: {error_msg}")
                             self._error = error_msg
@@ -2350,90 +2304,34 @@ class SHEEPIT_OT_pack_blend(Operator):
                             self.report({'ERROR'}, self._error)
                             return {'CANCELLED'}
                     
-                    self._phase = 'AUTHENTICATING'
+                    self._phase = 'SAVING_FILE'
                     return {'RUNNING_MODAL'}
                 
-                elif self._phase == 'AUTHENTICATING':
+                elif self._phase == 'SAVING_FILE':
                     submit_settings.submit_progress = 75.0
-                    submit_settings.submit_status_message = "Authenticating..."
+                    submit_settings.submit_status_message = "Saving blend file to output location..."
                     
-                    from ..utils.compat import get_addon_prefs
-                    # from ..utils.auth import load_auth_cookies  # Browser login commented out - using username/password only
-                    
-                    sheepit_prefs = get_addon_prefs()
-                    if not sheepit_prefs:
-                        self._error = "Addon preferences not found. Please configure SheepIt credentials in preferences."
-                        self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
-                        return {'CANCELLED'}
-                    
-                    # Get authentication - always use username/password (browser login commented out)
-                    # if sheepit_prefs.use_browser_login:
-                    #     self._auth_cookies = load_auth_cookies()
-                    #     if not self._auth_cookies:
-                    #         self._error = "No browser login session found. Please login via browser in preferences."
-                    #         self._cleanup(context, cancelled=True)
-                    #         self.report({'ERROR'}, self._error)
-                    #         return {'CANCELLED'}
-                    # else:
-                    if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
-                        self._error = "Please configure SheepIt username and password in preferences."
-                        self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
-                        return {'CANCELLED'}
-                    self._username = sheepit_prefs.sheepit_username
-                    self._password = sheepit_prefs.sheepit_password
-                    
-                    self._phase = 'UPLOADING_INIT'
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'UPLOADING_INIT':
-                    # Set status and force UI update before blocking upload
-                    submit_settings.submit_progress = 77.0
-                    submit_settings.submit_status_message = "Uploading to SheepIt..."
-                    
-                    # Force UI redraw to show the status update
-                    for area in context.screen.areas:
-                        if area.type == 'PROPERTIES':
-                            area.tag_redraw()
-                    
-                    # Process events to allow UI to update
-                    bpy.app.timers.register(lambda: None)
-                    
-                    print(f"[SheepIt Pack] DEBUG: Status set to 'Uploading to SheepIt...', transitioning to UPLOADING phase")
-                    self._phase = 'UPLOADING'
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'UPLOADING':
-                    # Now do the actual blocking upload
-                    from .api_submit import submit_file_to_sheepit
-                    
-                    print(f"[SheepIt Pack] DEBUG: Starting blocking upload operation...")
-                    self._success, self._message = submit_file_to_sheepit(
-                        self._blend_path,
-                        context.scene.sheepit_submit,
-                        auth_cookies=self._auth_cookies,
-                        username=self._username,
-                        password=self._password
-                    )
-                    
-                    if self._success:
+                    try:
+                        # Ensure output directory exists
+                        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        # Copy blend file to output location
+                        import shutil
+                        shutil.copy2(self._blend_path, self._output_path)
+                        
+                        print(f"[SheepIt Pack] Saved blend file to: {self._output_path}")
+                        self._success = True
+                        self._message = f"Blend file saved to: {self._output_path}"
+                        
                         submit_settings.submit_progress = 90.0
-                        submit_settings.submit_status_message = "Upload complete!"
-                        self._phase = 'OPENING_BROWSER'
-                    else:
-                        self._error = self._message
+                        submit_settings.submit_status_message = "File saved successfully!"
+                        self._phase = 'CLEANUP'
+                    except Exception as e:
+                        self._error = f"Failed to save file: {str(e)}"
                         self._cleanup(context, cancelled=True)
                         self.report({'ERROR'}, self._error)
                         return {'CANCELLED'}
                     
-                    return {'RUNNING_MODAL'}
-                
-                elif self._phase == 'OPENING_BROWSER':
-                    submit_settings.submit_progress = 92.0
-                    submit_settings.submit_status_message = "Opening browser..."
-                    # Browser is already opened by submit_file_to_sheepit
-                    self._phase = 'CLEANUP'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CLEANUP':
@@ -2458,14 +2356,14 @@ class SHEEPIT_OT_pack_blend(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     submit_settings.submit_progress = 100.0
-                    submit_settings.submit_status_message = "Submission complete!"
+                    submit_settings.submit_status_message = "Packing complete!"
                     
                     # Small delay to show completion
                     import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, self._message)
+                    self.report({'INFO'}, f"ZIP file saved to: {self._output_path}")
                     return {'FINISHED'}
                 
             except Exception as e:

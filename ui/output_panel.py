@@ -46,18 +46,18 @@ class SHEEPIT_PT_output_panel(Panel):
             box.prop(submit_settings, "submit_progress", text="Progress", slider=True)
             layout.separator()
         
-        # Submission Buttons
+        # Packing Buttons
         col = layout.column()
         col.scale_y = 1.5
         
-        # Submit Current Blend button (first)
-        op = col.operator("sheepit.submit_current", text="Submit Current Blend", icon='EXPORT')
+        # Pack Current Blend button (first)
+        op = col.operator("sheepit.submit_current", text="Pack Current Blend", icon='EXPORT')
         
-        # Submit as ZIP button
-        op = col.operator("sheepit.pack_zip", text="Submit as ZIP (for scenes with caches)", icon='PACKAGE')
+        # Pack as ZIP button
+        op = col.operator("sheepit.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
         
-        # Submit as Blend button
-        op = col.operator("sheepit.pack_blend", text="Submit as Blend", icon='FILE_BLEND')
+        # Pack as Blend button
+        op = col.operator("sheepit.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
         
         # Show pack output path if available (for debugging)
         if submit_settings.pack_output_path:
