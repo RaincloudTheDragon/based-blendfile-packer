@@ -210,31 +210,43 @@ def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tu
 def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root: Path, target_path: Path, ensure_autopack: bool = True) -> list[Path]:
     """Open a blend file and remap all library paths to be relative to the copied tree."""
     import json
+    import tempfile
     
-    copy_map_json = json.dumps(copy_map)
+    # Write copy_map to a temporary JSON file to avoid Windows command line length limits
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+        json.dump(copy_map, f, indent=None)
+        copy_map_file = Path(f.name)
     
-    autopack_block = ""
-    if ensure_autopack:
-        autopack_block = (
-            "try:\n"
-            "    fp = bpy.context.preferences.filepaths\n"
-            "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
-            "        if hasattr(fp, k):\n"
-            "            try:\n"
-            "                setattr(fp, k, True)\n"
-            "            except Exception:\n"
-            "                pass\n"
-            "except Exception:\n"
-            "    pass\n"
-        )
-    
-    remap_script = (
-        "import bpy, json\n"
-        "from pathlib import Path\n"
-        f"copy_map = json.loads(r'''{copy_map_json}''')\n"
-        f"common_root = Path(r'{str(common_root)}')\n"
-        f"target_path = Path(r'{str(target_path)}')\n"
-        "blend_dir = Path(bpy.data.filepath).parent\n"
+    try:
+        autopack_block = ""
+        if ensure_autopack:
+            autopack_block = (
+                "try:\n"
+                "    fp = bpy.context.preferences.filepaths\n"
+                "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
+                "        if hasattr(fp, k):\n"
+                "            try:\n"
+                "                setattr(fp, k, True)\n"
+                "            except Exception:\n"
+                "                pass\n"
+                "except Exception:\n"
+                "    pass\n"
+            )
+        
+        # Escape backslashes in paths for the script
+        copy_map_file_str = str(copy_map_file).replace('\\', '\\\\')
+        common_root_str = str(common_root).replace('\\', '\\\\')
+        target_path_str = str(target_path).replace('\\', '\\\\')
+        
+        remap_script = (
+            "import bpy, json\n"
+            "from pathlib import Path\n"
+            f"copy_map_file = Path(r'{copy_map_file_str}')\n"
+            f"with open(copy_map_file, 'r', encoding='utf-8') as f:\n"
+            f"    copy_map = json.load(f)\n"
+            f"common_root = Path(r'{common_root_str}')\n"
+            f"target_path = Path(r'{target_path_str}')\n"
+            "blend_dir = Path(bpy.data.filepath).parent\n"
         "bpy.context.preferences.filepaths.use_relative_paths = True\n"
         "remapped = 0\n"
         "unresolved = []\n"
@@ -292,8 +304,48 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "print(f'Remapped {{remapped}} libraries, {{len(unresolved)}} unresolved')\n"
         "if unresolved:\n"
         "    print(f'Unresolved paths: {{unresolved}}')\n"
+        "# Remap image/texture paths\n"
+        "images_remapped = 0\n"
+        "for img in bpy.data.images:\n"
+        "    if img.filepath and img.filepath not in ('', '<builtin>', '<memory>'):\n"
+        "        src = img.filepath\n"
+        "        # Convert to absolute path\n"
+        "        if src.startswith('//'):\n"
+        "            abs_src = (blend_dir / src[2:]).resolve()\n"
+        "        else:\n"
+        "            abs_src = Path(src).resolve()\n"
+        "        key = str(abs_src)\n"
+        "        new_abs = None\n"
+        "        # Check if already in target path\n"
+        "        try:\n"
+        "            if abs_src.relative_to(target_path):\n"
+        "                new_abs = abs_src\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        # Look up in copy_map\n"
+        "        if new_abs is None and key in copy_map:\n"
+        "            new_abs = Path(copy_map[key])\n"
+        "        # Try relative to common_root\n"
+        "        if new_abs is None:\n"
+        "            try:\n"
+        "                rel_to_root = abs_src.relative_to(common_root)\n"
+        "                new_abs = (target_path / rel_to_root).resolve()\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        # If we found a new path and it exists, remap\n"
+        "        if new_abs is not None and new_abs.exists():\n"
+        "            # Set absolute path first\n"
+        "            img.filepath = str(new_abs)\n"
+        "            # Then convert to relative\n"
+        "            try:\n"
+        "                rel_path = bpy.path.relpath(str(new_abs))\n"
+        "                img.filepath = rel_path\n"
+        "                images_remapped += 1\n"
+        "            except Exception:\n"
+        "                images_remapped += 1\n"
+        "print(f'Remapped {{images_remapped}} image/texture paths')\n"
         "# Save after remapping\n"
-        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)))\n"
+        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
         "# Make all paths relative\n"
         "try:\n"
         "    bpy.ops.file.make_paths_relative(basedir=str(blend_dir))\n"
@@ -302,11 +354,19 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "    print(f'Warning: make_paths_relative failed: {{e}}')\n"
         f"{autopack_block}"
         "# Final save\n"
-        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)))\n"
+        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
         "print('Remapping complete')\n"
-    )
+        )
+        
+        stdout, stderr, returncode = _run_blender_script(remap_script, blend_path)
+    finally:
+        # Clean up temp file
+        try:
+            if copy_map_file.exists():
+                copy_map_file.unlink()
+        except Exception:
+            pass
     
-    stdout, stderr, returncode = _run_blender_script(remap_script, blend_path)
     unresolved = []
     
     # Parse unresolved paths from output
@@ -360,7 +420,7 @@ def pack_all_in_blend(blend_path: Path) -> list[Path]:
         "                    pass\n"
         "    except Exception:\n"
         "        pass\n"
-        "    bpy.ops.wm.save_mainfile()\n"
+        "    bpy.ops.wm.save_mainfile(compress=True)\n"
         "except Exception as e:\n"
         "    print('Pack all failed:', e)\n"
     )
@@ -436,7 +496,7 @@ def pack_linked_in_blend(blend_path: Path) -> tuple[list[Path], list[Path]]:
         "except Exception:\n"
         "    pass\n"
         "print('Saving file...')\n"
-        "bpy.ops.wm.save_mainfile()\n"
+        "bpy.ops.wm.save_mainfile(compress=True)\n"
         "print(f'=== Pack Linked Complete (packed: {packed_count}, missing: {len(missing_files)}, oversized: {len(oversized_files)}) ===')\n"
         "for mf in missing_files:\n"
         "    print(f'MISSING_FILE: {mf}')\n"
@@ -592,7 +652,7 @@ def enable_nla_in_blend(blend_path: Path, autopack_on_save: bool = True) -> None
         "        except Exception:\n"
         "            pass\n"
         f"{autopack_block}"
-        "bpy.ops.wm.save_mainfile()\n"
+        "bpy.ops.wm.save_mainfile(compress=True)\n"
     )
     
     _run_blender_script(script, blend_path)
@@ -813,7 +873,8 @@ class IncrementalPacker:
                     file_size = asset_usage.abspath.stat().st_size
                     shutil.copy2(asset_usage.abspath, target_asset_path)
                     self.copied_paths.add(asset_usage.abspath)
-                    if asset_usage.is_blendfile and asset_usage.abspath.suffix.lower() == ".blend":
+                    # Add to copy_map for remapping (blend files and image/texture files)
+                    if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov"):
                         self.copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
                     if (i < 5) or (i % 50 == 0):
                         print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
@@ -1211,7 +1272,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 file_size = asset_usage.abspath.stat().st_size
                 shutil.copy2(asset_usage.abspath, target_asset_path)
                 copied_paths.add(asset_usage.abspath)
-                if asset_usage.is_blendfile and asset_usage.abspath.suffix.lower() == ".blend":
+                # Add to copy_map for remapping (blend files and image/texture files)
+                if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov"):
                     copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
                 if asset_count <= 5 or asset_count % 50 == 0:  # Log first 5 and every 50th
                     print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")

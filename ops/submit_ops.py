@@ -31,7 +31,7 @@ for scene in bpy.data.scenes:
     scene.frame_start = {frame_start}
     scene.frame_end = {frame_end}
     scene.frame_step = {frame_step}
-bpy.ops.wm.save_mainfile()
+bpy.ops.wm.save_mainfile(compress=True)
 print(f'Applied frame range {frame_start}-{frame_end} (step {frame_step}) to all scenes')
 """
     
@@ -83,7 +83,7 @@ def save_current_blend_with_frame_range(submit_settings, temp_dir: Optional[Path
     # Save current blend state
     try:
         temp_dir.mkdir(parents=True, exist_ok=True)
-        bpy.ops.wm.save_as_mainfile(filepath=str(temp_blend), copy=True)
+        bpy.ops.wm.save_as_mainfile(filepath=str(temp_blend), copy=True, compress=True)
         print(f"[SheepIt Submit] Saved current blend state to temp file")
     except Exception as e:
         error_msg = f"Failed to save current blend state: {type(e).__name__}: {str(e)}"
@@ -381,6 +381,28 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
     print(f"[SheepIt Submit] Starting ZIP creation...")
     print(f"[SheepIt Submit]   Directory: {directory}")
     print(f"[SheepIt Submit]   Output: {output_zip}")
+    
+    # Delete .blend1 through .blend32 backup files before zipping
+    if progress_callback:
+        progress_callback(0.0, "Removing backup files...")
+    
+    backup_files = []
+    for i in range(1, 33):  # blend1 through blend32
+        pattern = f"*.blend{i}"
+        backup_files.extend(directory.rglob(pattern))
+    
+    if backup_files:
+        print(f"[SheepIt Submit]   Found {len(backup_files)} backup files (.blend1-.blend32), deleting...")
+        deleted_count = 0
+        for backup_file in backup_files:
+            try:
+                backup_file.unlink()
+                deleted_count += 1
+            except Exception as e:
+                print(f"[SheepIt Submit]   WARNING: Could not delete {backup_file.name}: {e}")
+        print(f"[SheepIt Submit]   Deleted {deleted_count}/{len(backup_files)} backup files")
+    else:
+        print(f"[SheepIt Submit]   No backup files (.blend1-.blend32) found")
     
     if progress_callback:
         progress_callback(0.0, "Counting files...")
