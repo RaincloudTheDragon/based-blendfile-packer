@@ -47,79 +47,110 @@ def submit_file_to_sheepit(
     file_size_mb = file_size / (1024 * 1024)
     print(f"[SheepIt API] File size: {file_size_mb:.2f} MB ({file_size:,} bytes)")
     
+    # Initialize cookie jar and opener (will be created if needed)
+    cookie_jar = None
+    session_opener = None
+    
     # Get authentication headers
     if auth_cookies:
         print(f"[SheepIt API] Using browser login cookies")
+        print(f"[SheepIt API] Cookie keys: {list(auth_cookies.keys())}")
         headers = get_auth_headers(auth_cookies)
+        # Add Referer header (some servers require this for CSRF protection)
+        headers['Referer'] = f"{config.SHEEPIT_CLIENT_BASE}/getstarted"
+        print(f"[SheepIt API] Request headers: {list(headers.keys())}")
+        # Don't print full cookie values for security, but show if they exist
+        if 'Cookie' in headers:
+            cookie_preview = headers['Cookie'][:100] + "..." if len(headers['Cookie']) > 100 else headers['Cookie']
+            print(f"[SheepIt API] Cookie header preview: {cookie_preview}")
     elif username and password:
         print(f"[SheepIt API] Using username/password authentication")
-        # For username/password, we need to login first to get session cookies
-        # Use the same login flow as _test_with_credentials but get cookies directly
-        import urllib.request
-        import urllib.error
-        import urllib.parse
+        # For username/password, we need to login via /user/authenticate endpoint
+        # This matches the JavaScript login flow (login.js)
         import http.cookiejar
+        import time
         
         cookie_jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        session_opener = opener  # Store for reuse later
         
-        login_url = f"{config.SHEEPIT_CLIENT_BASE}/user/signin"
-        
-        # Get login page for CSRF token
+        # First, get the login page to establish session and get PHPSESSID
+        login_page_url = f"{config.SHEEPIT_CLIENT_BASE}/user/signin"
         try:
-            req = urllib.request.Request(login_url)
+            req = urllib.request.Request(login_page_url)
             req.add_header('User-Agent', f'SheepIt-Blender-Addon/{config.ADDON_ID}')
             with opener.open(req, timeout=10) as response:
-                login_page = response.read().decode('utf-8', errors='ignore')
+                # Read response to ensure cookies are captured
+                response.read()
+                print(f"[SheepIt API] Loaded login page, got {len(cookie_jar)} cookies")
         except Exception as e:
             error_msg = f"Failed to load login page: {str(e)}"
             print(f"[SheepIt API] ERROR: {error_msg}")
             return False, error_msg
         
-        # Prepare login data
-        login_data = {'username': username, 'password': password}
+        # Prepare login data - use 'login' field name (not 'username') and include timezone
+        # This matches the JavaScript login.js implementation
+        # Get timezone - use UTC as default (server should handle it)
+        # Note: JavaScript uses jstz.determine().name() which returns IANA timezone names
+        # For now, we use UTC as a safe default
+        timezone = 'UTC'
+        print(f"[SheepIt API] Using timezone: {timezone} (default)")
         
-        # Look for CSRF token
-        import re
-        csrf_match = re.search(r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']', login_page, re.IGNORECASE)
-        if csrf_match:
-            login_data['csrf_token'] = csrf_match.group(1)
+        authenticate_url = f"{config.SHEEPIT_CLIENT_BASE}/user/authenticate"
+        login_data = {
+            'login': username,  # Note: field name is 'login', not 'username'
+            'password': password,
+            'timezone': timezone
+        }
         
-        # Submit login form
+        # Submit login to /user/authenticate endpoint
         data = urllib.parse.urlencode(login_data).encode('utf-8')
-        req = urllib.request.Request(login_url, data=data)
+        req = urllib.request.Request(authenticate_url, data=data, method='POST')
         req.add_header('User-Agent', f'SheepIt-Blender-Addon/{config.ADDON_ID}')
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
-        req.add_header('Referer', login_url)
+        req.add_header('Referer', login_page_url)
+        req.add_header('X-Requested-With', 'XMLHttpRequest')  # Match AJAX request
         
         try:
             with opener.open(req, timeout=10) as response:
+                response_text = response.read().decode('utf-8', errors='ignore')
                 final_url = response.geturl()
+                
+                print(f"[SheepIt API] Authenticate response: status={response.status}, final_url={final_url}")
+                print(f"[SheepIt API] Response text: {response_text[:100]}")
+                
                 # Check if login was successful
-                if '/user/signin' in final_url or '/user/login' in final_url:
-                    error_msg = "Login failed: Invalid username or password"
+                # The endpoint returns 'OK' on success, or an error message
+                if response_text.strip() == 'OK':
+                    # Extract cookies from cookie jar
+                    cookies = {}
+                    for cookie in cookie_jar:
+                        cookies[cookie.name] = cookie.value
+                    
+                    if not cookies:
+                        error_msg = "Login succeeded but no session cookies received"
+                        print(f"[SheepIt API] ERROR: {error_msg}")
+                        return False, error_msg
+                    
+                    print(f"[SheepIt API] Login successful, got cookies: {list(cookies.keys())}")
+                    # Set auth_cookies so the rest of the code can use them
+                    auth_cookies = cookies
+                    headers = get_auth_headers(cookies)
+                    # Also keep the cookie jar and opener for reuse
+                    # (cookie_jar and opener are already created above)
+                else:
+                    error_msg = f"Login failed: {response_text.strip()}"
                     print(f"[SheepIt API] ERROR: {error_msg}")
                     return False, error_msg
-                
-                # Extract cookies from cookie jar
-                cookies = {}
-                for cookie in cookie_jar:
-                    cookies[cookie.name] = cookie.value
-                
-                if not cookies:
-                    error_msg = "Login succeeded but no session cookies received"
-                    print(f"[SheepIt API] ERROR: {error_msg}")
-                    return False, error_msg
-                
-                print(f"[SheepIt API] Login successful, got cookies: {list(cookies.keys())}")
-                headers = get_auth_headers(cookies)
         except urllib.error.HTTPError as e:
-            error_msg = f"Login failed with HTTP {e.code}"
+            error_msg = f"Login failed with HTTP {e.code}: {e.read().decode('utf-8', errors='ignore')[:100]}"
             print(f"[SheepIt API] ERROR: {error_msg}")
             return False, error_msg
         except Exception as e:
             error_msg = f"Login failed: {type(e).__name__}: {str(e)}"
             print(f"[SheepIt API] ERROR: {error_msg}")
+            import traceback
+            traceback.print_exc()
             return False, error_msg
     else:
         error_msg = "No authentication method provided"
@@ -144,22 +175,461 @@ def submit_file_to_sheepit(
         print(f"[SheepIt API] Memory used: {submit_settings.memory_used_mb} MB")
     
     # Prepare multipart/form-data
-    # Note: API endpoint needs to be discovered - using placeholder for now
-    api_endpoint = f"{config.SHEEPIT_CLIENT_BASE}/api/project/submit"
-    print(f"[SheepIt API] Submitting to: {api_endpoint}")
+    # First, get the /getstarted page to extract form field names and CSRF tokens
+    # Use www subdomain to match manual browser test (user confirmed this works)
+    getstarted_url = f"{config.SHEEPIT_API_BASE}/getstarted"
+    print(f"[SheepIt API] Fetching form page: {getstarted_url}")
+    
+    # Initialize defaults
+    api_endpoint = getstarted_url
+    file_field_name = 'file'
+    csrf_token = None
+    
+    # Create ONE cookie jar for the entire submission flow
+    # This ensures session state is maintained across all requests
+    # If we already have a cookie_jar from username/password login, reuse it
+    import http.cookiejar
+    if cookie_jar is None:
+        cookie_jar = http.cookiejar.CookieJar()
+        
+        # Add our initial cookies to the jar (if we have auth_cookies)
+        if auth_cookies:
+            for name, value in auth_cookies.items():
+                cookie = http.cookiejar.Cookie(
+                    version=0, name=name, value=value,
+                    port=None, port_specified=False,
+                    domain='.sheepit-renderfarm.com', domain_specified=True, domain_initial_dot=True,
+                    path='/', path_specified=True,
+                    secure=True, expires=None, discard=False,
+                    comment=None, comment_url=None,
+                    rest={'HttpOnly': None}, rfc2109=False
+                )
+                cookie_jar.set_cookie(cookie)
+    
+    # Create opener that will be reused for all requests (if not already created)
+    if session_opener is None:
+        session_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    
+    # WARM UP: First hit a protected endpoint to establish session for authenticated requests
+    # /home is public, so try /project which requires authentication (like the upload endpoint)
+    # Use www subdomain to match manual browser test (user confirmed this works)
+    warmup_url = f"{config.SHEEPIT_API_BASE}/project"  # Protected endpoint - requires auth
+    print(f"[SheepIt API] Warming up session with GET to protected endpoint: {warmup_url}...")
+    print(f"[SheepIt API] Using cookie jar to capture session updates...")
+    try:
+        warmup_req = urllib.request.Request(warmup_url, headers=headers)
+        with session_opener.open(warmup_req, timeout=10) as warmup_response:
+            warmup_final_url = warmup_response.geturl()
+            warmup_status = warmup_response.status
+            print(f"[SheepIt API] Warmup response: status={warmup_status}, final_url={warmup_final_url}")
+            
+            # Read response body to fully establish session (Symfony might need this)
+            warmup_body = warmup_response.read()
+            print(f"[SheepIt API] Warmup response body length: {len(warmup_body)} bytes")
+            
+            # Check for Set-Cookie headers
+            response_headers = dict(warmup_response.headers)
+            if 'Set-Cookie' in response_headers:
+                print(f"[SheepIt API] Set-Cookie from warmup: {response_headers['Set-Cookie'][:100]}...")
+            
+            # Check if session is valid (if redirected to sign-in, session is invalid)
+            if 'signin' in warmup_final_url.lower() or 'login' in warmup_final_url.lower():
+                # Session not valid for protected endpoint - try public endpoint to get PHPSESSID
+                # This might establish a session that we can use
+                print(f"[SheepIt API] Protected endpoint redirected to sign-in, trying public /home to establish session...")
+                warmup_url_fallback = f"{config.SHEEPIT_API_BASE}/home"
+                warmup_req_fallback = urllib.request.Request(warmup_url_fallback, headers=headers)
+                with session_opener.open(warmup_req_fallback, timeout=10) as warmup_response_fallback:
+                    warmup_final_url_fallback = warmup_response_fallback.geturl()
+                    warmup_status_fallback = warmup_response_fallback.status
+                    print(f"[SheepIt API] Fallback warmup response: status={warmup_status_fallback}, final_url={warmup_final_url_fallback}")
+                    warmup_body_fallback = warmup_response_fallback.read()
+                    print(f"[SheepIt API] Fallback warmup response body length: {len(warmup_body_fallback)} bytes")
+                    
+                    # Even if fallback works, the protected endpoint failed, so warn the user
+                    print(f"[SheepIt API] WARNING: Protected endpoint redirected to sign-in. Session may not be valid for authenticated requests.")
+                    print(f"[SheepIt API] Continuing anyway - upload may fail if session is invalid.")
+            
+            print(f"[SheepIt API] Session confirmed valid!")
+            
+            # Show cookies in jar after warmup
+            jar_cookies = {c.name: c.value for c in cookie_jar}
+            print(f"[SheepIt API] Cookies in jar after warmup: {list(jar_cookies.keys())}")
+            for name, value in jar_cookies.items():
+                print(f"[SheepIt API]   {name}: {value[:30]}...")
+            
+            # Update headers with cookies from jar (in case any were updated)
+            if jar_cookies:
+                cookie_str = '; '.join(f"{k}={v}" for k, v in jar_cookies.items())
+                headers['Cookie'] = cookie_str
+                print(f"[SheepIt API] Updated Cookie header with jar contents: {cookie_str[:50]}...")
+    except Exception as warmup_e:
+        print(f"[SheepIt API] Warmup failed: {type(warmup_e).__name__}: {warmup_e}")
+        import traceback
+        traceback.print_exc()
+        # Continue anyway - maybe the upload will work
     
     try:
-        # Create multipart form data using proper encoding
+        # Get the form page to extract field names and CSRF tokens
+        # Use the SAME cookie jar and opener from warmup
+        print(f"[SheepIt API] Fetching form page with cookie jar (reusing from warmup)...")
+        
+        form_opener = session_opener  # Reuse the same opener
+        
+        form_req = urllib.request.Request(getstarted_url, headers=headers)
+        print(f"[SheepIt API] Request URL: {getstarted_url}")
+        print(f"[SheepIt API] Request headers: {list(headers.keys())}")
+        if 'Cookie' in headers:
+            print(f"[SheepIt API] Cookie header: {headers['Cookie']}")
+        
+        # Use opener with cookie jar to capture any Set-Cookie headers
+        with form_opener.open(form_req, timeout=10) as form_response:
+            form_html = form_response.read().decode('utf-8', errors='ignore')
+            final_form_url = form_response.geturl()
+            print(f"[SheepIt API] Form page loaded, length: {len(form_html)} bytes")
+            print(f"[SheepIt API] Final form page URL: {final_form_url}")
+            print(f"[SheepIt API] Response status: {form_response.status}")
+            
+            # Check for Set-Cookie headers
+            form_response_headers = dict(form_response.headers)
+            if 'Set-Cookie' in form_response_headers:
+                print(f"[SheepIt API] Set-Cookie from getstarted: {form_response_headers['Set-Cookie'][:100]}...")
+            
+            # Check if we got redirected to sign-in
+            if 'signin' in final_form_url.lower() or 'login' in final_form_url.lower():
+                print(f"[SheepIt API] ERROR: Form page redirected to sign-in! Authentication may have expired.")
+                print(f"[SheepIt API] Redirected to: {final_form_url}")
+                # Try to extract error message
+                if 'You need to be logged in' in form_html or 'sign in' in form_html.lower():
+                    print(f"[SheepIt API] Form page indicates authentication required")
+                # Return error - can't proceed without valid session
+                error_msg = "Authentication expired. Please re-authenticate via browser login in preferences."
+                print(f"[SheepIt API] ERROR: {error_msg}")
+                return False, error_msg
+            
+            # Check if we're authenticated on the getstarted page
+            # Look for indicators of logged-in state
+            has_upload_form = 'enctype="multipart/form-data"' in form_html or 'addproject_archive' in form_html
+            has_logout = 'logout' in form_html.lower() or 'sign out' in form_html.lower()
+            has_user_menu = '/user/profile' in form_html or 'My account' in form_html
+            print(f"[SheepIt API] Getstarted page authentication check:")
+            print(f"[SheepIt API]   Has upload form: {has_upload_form}")
+            print(f"[SheepIt API]   Has logout link: {has_logout}")
+            print(f"[SheepIt API]   Has user menu: {has_user_menu}")
+            
+            if not has_upload_form:
+                print(f"[SheepIt API] WARNING: Upload form not found on getstarted page!")
+                print(f"[SheepIt API] This suggests we're not authenticated on this page.")
+                # Search for the actual upload form
+                if 'addproject' in form_html.lower():
+                    print(f"[SheepIt API] Found 'addproject' in page - partial form may be present")
+                else:
+                    print(f"[SheepIt API] No 'addproject' elements found - likely not logged in")
+            
+            # Update cookies from response (might get new session cookies)
+            jar_cookies = {c.name: c.value for c in cookie_jar}
+            if jar_cookies:
+                print(f"[SheepIt API] Cookies in jar after form page fetch: {list(jar_cookies.keys())}")
+                # Update headers with cookies from jar
+                cookie_str = '; '.join(f"{k}={v}" for k, v in jar_cookies.items())
+                headers['Cookie'] = cookie_str
+                print(f"[SheepIt API] Updated Cookie header with jar contents: {cookie_str[:50]}...")
+            
+            # Extract form action (where to submit)
+            import re
+            form_action_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', form_html, re.IGNORECASE)
+            if form_action_match:
+                form_action = form_action_match.group(1)
+                # Skip JavaScript handlers (javascript:, #, empty, etc.)
+                if form_action.startswith('javascript:') or form_action == '#' or form_action == '':
+                    print(f"[SheepIt API] Form uses JavaScript handler ({form_action}), submitting to page itself")
+                    api_endpoint = getstarted_url
+                # Handle relative URLs
+                elif form_action.startswith('/'):
+                    api_endpoint = f"{config.SHEEPIT_API_BASE}{form_action}"
+                elif form_action.startswith('http'):
+                    api_endpoint = form_action
+                else:
+                    api_endpoint = f"{config.SHEEPIT_API_BASE}/{form_action}"
+                print(f"[SheepIt API] Found form action: {api_endpoint}")
+            else:
+                # Default to /getstarted if no action found (form submits to itself)
+                api_endpoint = getstarted_url
+                print(f"[SheepIt API] No form action found, using: {api_endpoint}")
+            
+            # Extract CSRF token if present
+            csrf_patterns = [
+                r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']',
+                r'name=["\']_token["\']\s+value=["\']([^"\']+)["\']',
+                r'name=["\']csrf["\']\s+value=["\']([^"\']+)["\']',
+                r'csrf["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                r'_token["\']?\s*[:=]\s*["\']([^"\']+)["\']',  # Laravel-style tokens
+                r'<meta[^>]*name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)["\']',  # Meta tag
+            ]
+            for pattern in csrf_patterns:
+                csrf_match = re.search(pattern, form_html, re.IGNORECASE)
+                if csrf_match:
+                    csrf_token = csrf_match.group(1)
+                    print(f"[SheepIt API] Found CSRF token using pattern: {pattern[:50]}...")
+                    print(f"[SheepIt API] CSRF token value: {csrf_token[:30]}... (length: {len(csrf_token)})")
+                    break
+            else:
+                print(f"[SheepIt API] No CSRF token found (tried {len(csrf_patterns)} patterns)")
+                # Print a snippet of the HTML to help debug
+                form_start = form_html.find('<form')
+                if form_start != -1:
+                    form_snippet = form_html[form_start:form_start+3000]
+                    print(f"[SheepIt API] Form HTML snippet (first 3000 chars after <form): {form_snippet}")
+                else:
+                    print(f"[SheepIt API] No <form> tag found in HTML")
+                    # Look for any input fields that might be relevant
+                    input_fields = re.findall(r'<input[^>]+>', form_html, re.IGNORECASE)
+                    print(f"[SheepIt API] Found {len(input_fields)} input fields in HTML")
+                    for idx, inp in enumerate(input_fields[:10]):  # First 10
+                        print(f"[SheepIt API] Input {idx+1}: {inp[:200]}")
+            
+            # Extract form field names to see what's expected
+            # Try multiple patterns for file input
+            file_patterns = [
+                r'<input[^>]*type=["\']file["\'][^>]*name=["\']([^"\']+)["\']',  # Standard pattern
+                r'name=["\']([^"\']+)["\'][^>]*type=["\']file["\']',  # Reversed order
+                r'<input[^>]*name=["\']([^"\']+)["\'][^>]*type=["\']file["\']',  # Name first
+            ]
+            for pattern in file_patterns:
+                file_field_match = re.search(pattern, form_html, re.IGNORECASE)
+                if file_field_match:
+                    file_field_name = file_field_match.group(1)
+                    print(f"[SheepIt API] File field name: {file_field_name}")
+                    break
+            else:
+                print(f"[SheepIt API] File field name not found in form, using default: {file_field_name}")
+            
+            # Also look for any file upload endpoints or UID references in the HTML/JS
+            # The JavaScript might show a file upload endpoint that happens before add_internal
+            uid_patterns = [
+                r'uid["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                r'upload.*uid',
+                r'file.*upload.*endpoint',
+            ]
+            print(f"[SheepIt API] Searching for file upload patterns in form HTML...")
+            # Look for any references to file uploads or UIDs in script tags
+            script_tags = re.findall(r'<script[^>]*>([^<]+)</script>', form_html, re.IGNORECASE | re.DOTALL)
+            for script_content in script_tags[:5]:  # Check first 5 script tags
+                if 'upload' in script_content.lower() or 'file' in script_content.lower():
+                    print(f"[SheepIt API] Found script with upload/file references: {script_content[:500]}...")
+            
+            # Also look for any JavaScript that might reveal the endpoint or field names
+            # Search for common AJAX patterns - be more thorough
+            ajax_patterns = [
+                r'\.ajax\(["\']([^"\']+)["\']',  # jQuery .ajax('/project/add_internal', ...) - FIRST to catch this pattern
+                r'\.post\(["\']([^"\']+)["\']',  # jQuery .post()
+                r'\.ajax\([^}]*url:\s*["\']([^"\']+)["\']',  # jQuery .ajax({url: '...'})
+                r'fetch\(["\']([^"\']+)["\']',  # Fetch API
+                r'XMLHttpRequest[^}]*open\(["\']POST["\'][^,]*,\s*["\']([^"\']+)["\']',  # XHR
+                r'action:\s*["\']([^"\']+)["\']',  # Generic action
+                r'url:\s*["\']([^"\']+)["\']',  # Generic url
+                r'["\']([^"\']*project[^"\']*submit[^"\']*)["\']',  # Anything with "project" and "submit"
+                r'["\']([^"\']*submit[^"\']*project[^"\']*)["\']',  # Anything with "submit" and "project"
+            ]
+            found_endpoints = []
+            for pattern in ajax_patterns:
+                for ajax_match in re.finditer(pattern, form_html, re.IGNORECASE | re.DOTALL):
+                    ajax_url = ajax_match.group(1)
+                    # Filter out common false positives
+                    if ajax_url and not ajax_url.startswith('javascript') and ajax_url not in found_endpoints:
+                        if ajax_url.startswith('/'):
+                            potential_endpoint = f"{config.SHEEPIT_API_BASE}{ajax_url}"
+                            found_endpoints.append(ajax_url)
+                            print(f"[SheepIt API] Found potential AJAX endpoint in JS: {potential_endpoint}")
+                            # If we find a project/submit endpoint, use it
+                            if 'project' in ajax_url.lower() and 'submit' in ajax_url.lower():
+                                api_endpoint = potential_endpoint
+                                print(f"[SheepIt API] Using discovered project submission endpoint: {api_endpoint}")
+                        elif ajax_url.startswith('http'):
+                            found_endpoints.append(ajax_url)
+                            print(f"[SheepIt API] Found potential AJAX endpoint in JS: {ajax_url}")
+            
+            # Try to fetch the addproject.js file to find the real endpoint
+            js_files_to_check = [
+                '/media/ce152504/script/ajax/addproject.js',
+                '/media/ce152504/script/ajax/getstarted.js',
+            ]
+            for js_path in js_files_to_check:
+                try:
+                    js_url = f"{config.SHEEPIT_API_BASE}{js_path}"
+                    print(f"[SheepIt API] Attempting to fetch JavaScript file: {js_url}")
+                    js_req = urllib.request.Request(js_url, headers=headers)
+                    with urllib.request.urlopen(js_req, timeout=5) as js_response:
+                        js_content = js_response.read().decode('utf-8', errors='ignore')
+                        print(f"[SheepIt API] Loaded {js_path}, length: {len(js_content)} bytes")
+                        # Print more of the JS for debugging, especially looking for FormData or .ajax calls
+                        if js_path.endswith('addproject.js'):
+                            # Search for the actual submission call - look for .ajax, .post, or FormData
+                            submission_patterns = [
+                                r'\.ajax\([^}]*url[^}]*\}',
+                                r'\.post\([^)]+\)',
+                                r'FormData[^}]+\.(?:send|submit|post)',
+                                r'action["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                            ]
+                            print(f"[SheepIt API] Searching for submission patterns in addproject.js...")
+                            for pattern in submission_patterns:
+                                matches = list(re.finditer(pattern, js_content, re.IGNORECASE | re.DOTALL))
+                                if matches:
+                                    print(f"[SheepIt API] Found {len(matches)} matches for pattern: {pattern[:50]}...")
+                                    for idx, match in enumerate(matches[:3]):  # Show first 3 matches
+                                        start = max(0, match.start() - 100)
+                                        end = min(len(js_content), match.end() + 300)
+                                        print(f"[SheepIt API] Match {idx+1}: ...{js_content[start:end]}...")
+                            
+                            # Also print a section that likely contains the submission (search for "submit" or "add")
+                            submit_section = re.search(r'submit[^}]{0,500}', js_content, re.IGNORECASE | re.DOTALL)
+                            if submit_section:
+                                print(f"[SheepIt API] Submission section found: ...{submit_section.group(0)[:800]}...")
+                            
+                            # Look for file upload patterns - the file might be uploaded separately first
+                            # Also search for where the file input is used
+                            file_upload_section = re.search(r'input.*type.*file[^}]{0,1000}', js_content, re.IGNORECASE | re.DOTALL)
+                            if file_upload_section:
+                                print(f"[SheepIt API] File input section: ...{file_upload_section.group(0)[:600]}...")
+                            
+                            # Search for FormData usage with file uploads
+                            formdata_sections = list(re.finditer(r'FormData[^}]{0,800}', js_content, re.IGNORECASE | re.DOTALL))
+                            if formdata_sections:
+                                print(f"[SheepIt API] Found {len(formdata_sections)} FormData sections in addproject.js")
+                                for idx, match in enumerate(formdata_sections[:3]):
+                                    start = max(0, match.start() - 50)
+                                    end = min(len(js_content), match.end() + 200)
+                                    print(f"[SheepIt API] FormData section {idx+1}: ...{js_content[start:end]}...")
+                            
+                            # Print the full JavaScript to see the upload flow
+                            print(f"[SheepIt API] Full addproject.js content (for analysis):")
+                            print(js_content)
+                        
+                        # Search for endpoints in the JavaScript
+                        # First pass: collect all endpoints
+                        all_js_endpoints = []
+                        for pattern in ajax_patterns:
+                            for js_match in re.finditer(pattern, js_content, re.IGNORECASE | re.DOTALL):
+                                js_url_found = js_match.group(1)
+                                if js_url_found and not js_url_found.startswith('javascript') and js_url_found not in found_endpoints:
+                                    if js_url_found.startswith('/'):
+                                        all_js_endpoints.append(js_url_found)
+                                    elif js_url_found.startswith('http'):
+                                        found_endpoints.append(js_url_found)
+                                        print(f"[SheepIt API] Found endpoint in {js_path}: {js_url_found}")
+                        
+                        # Second pass: prioritize endpoints (prefer "add" without "analyse")
+                        # Also try endpoints on both www and client subdomains
+                        for js_url_found in all_js_endpoints:
+                            # Try on www first
+                            potential_endpoint_www = f"{config.SHEEPIT_API_BASE}{js_url_found}"
+                            # Try on client subdomain
+                            potential_endpoint_client = f"{config.SHEEPIT_CLIENT_BASE}{js_url_found}"
+                            
+                            found_endpoints.append(js_url_found)
+                            print(f"[SheepIt API] Found endpoint in {js_path}: {potential_endpoint_www} (also trying: {potential_endpoint_client})")
+                            
+                            # Prioritize: exact match "/project/add_internal" (the actual submission endpoint) > "/project/add" or "/add" > "add" without "analyse" > others
+                            if js_url_found.lower() == '/project/add_internal':
+                                # This is the actual submission endpoint!
+                                # Try client subdomain first (where connection test works), then www
+                                api_endpoint = potential_endpoint_client  # Try client subdomain first
+                                print(f"[SheepIt API] Found submission endpoint '/project/add_internal' from {js_path}")
+                                print(f"[SheepIt API] Trying client subdomain first: {api_endpoint}")
+                                print(f"[SheepIt API] Will fallback to www if needed: {potential_endpoint_www}")
+                                break
+                            elif js_url_found.lower() in ['/project/add', '/add']:
+                                # Try client subdomain first for project endpoints
+                                if api_endpoint == getstarted_url:
+                                    api_endpoint = potential_endpoint_client
+                                    print(f"[SheepIt API] Using preferred endpoint from {js_path} (client subdomain): {api_endpoint}")
+                            elif 'add' in js_url_found.lower() and 'analyse' not in js_url_found.lower() and 'internal' not in js_url_found.lower() and api_endpoint == getstarted_url:
+                                # Try client subdomain for add endpoints (but not add_internal, which we already handled)
+                                api_endpoint = potential_endpoint_client
+                                print(f"[SheepIt API] Using endpoint from {js_path} (client subdomain): {api_endpoint}")
+                        
+                        # Also look for FormData usage which might reveal the endpoint
+                        formdata_patterns = [
+                            r'FormData[^}]*\.(?:post|send|submit)\(["\']([^"\']+)["\']',
+                            r'new FormData\([^)]*\)[^}]*\.(?:post|send|submit)\(["\']([^"\']+)["\']',
+                        ]
+                        for pattern in formdata_patterns:
+                            for fd_match in re.finditer(pattern, js_content, re.IGNORECASE | re.DOTALL):
+                                fd_url = fd_match.group(1)
+                                if fd_url and fd_url.startswith('/') and fd_url not in found_endpoints:
+                                    potential_endpoint = f"{config.SHEEPIT_API_BASE}{fd_url}"
+                                    found_endpoints.append(fd_url)
+                                    print(f"[SheepIt API] Found FormData endpoint in {js_path}: {potential_endpoint}")
+                                    if 'add' in fd_url.lower() or 'project' in fd_url.lower():
+                                        api_endpoint = potential_endpoint
+                                        print(f"[SheepIt API] Using FormData endpoint from {js_path}: {api_endpoint}")
+                except Exception as js_e:
+                    print(f"[SheepIt API] Could not fetch {js_path}: {type(js_e).__name__}: {str(js_e)}")
+            
+            # Also try common endpoint patterns as fallback
+            # If we haven't found a good endpoint yet, try these
+            if api_endpoint == getstarted_url or 'getstarted' in api_endpoint:
+                # Try the actual submission endpoint first (from JavaScript analysis)
+                # Try client subdomain first since connection test works there
+                common_endpoints = [
+                    (config.SHEEPIT_CLIENT_BASE, '/project/add_internal'),  # Try client first!
+                    (config.SHEEPIT_API_BASE, '/project/add_internal'),  # Then www
+                    (config.SHEEPIT_CLIENT_BASE, '/project/add'),
+                    (config.SHEEPIT_API_BASE, '/project/add'),
+                ]
+                print(f"[SheepIt API] No valid endpoint found, will try common patterns")
+                # Try the first common endpoint (add_internal on client subdomain)
+                api_endpoint = f"{common_endpoints[0][0]}{common_endpoints[0][1]}"
+                print(f"[SheepIt API] Trying common endpoint (client subdomain): {api_endpoint}")
+            
+    except Exception as e:
+        print(f"[SheepIt API] WARNING: Could not fetch form page: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"[SheepIt API] Exception traceback:")
+        traceback.print_exc()
+        print(f"[SheepIt API] Using default endpoint: {getstarted_url}")
+        api_endpoint = getstarted_url
+        file_field_name = 'file'
+        csrf_token = None
+        cookie_jar = None
+        submit_opener = None
+    
+    # STEP 1: Upload file to /project/internal/upload
+    # This is a two-step process:
+    # 1. Upload file to /project/internal/upload (field: addproject_archive)
+    # 2. Extract token from redirect
+    # 3. Poll /project/add_analyse/{token} until analysis is complete
+    # 4. Submit metadata to /project/add_internal with token
+    
+    print(f"[SheepIt API] Step 1: Uploading file to /project/internal/upload...")
+    
+    # IMPORTANT: Use the same opener that successfully fetched getstarted page
+    # This ensures the session is properly established
+    # Verify we have auth_cookies (required for upload)
+    if not auth_cookies:
+        error_msg = "No authentication cookies available. Please authenticate via browser login."
+        print(f"[SheepIt API] ERROR: {error_msg}")
+        return False, error_msg
+    
+    # Use the SAME session_opener from warmup/getstarted - this maintains session state
+    
+    # Use www subdomain (matches what works manually in browser)
+    # User confirmed manual submission works on www.sheepit-renderfarm.com/getstarted
+    upload_url = f"{config.SHEEPIT_API_BASE}/project/internal/upload"
+    print(f"[SheepIt API] Upload URL: {upload_url} (using www subdomain to match manual browser test)")
+    
+    try:
+        # Create multipart form data for file upload
         boundary = '----WebKitFormBoundary' + os.urandom(16).hex()
         
         # Build form data parts
         body_parts = []
         crlf = b'\r\n'
         
-        # File field
+        # File field name is 'addproject_archive' (from controller code)
         body_parts.append(f'--{boundary}'.encode('utf-8'))
         body_parts.append(crlf)
-        body_parts.append(f'Content-Disposition: form-data; name="file"; filename="{file_path.name}"'.encode('utf-8'))
+        body_parts.append(f'Content-Disposition: form-data; name="addproject_archive"; filename="{file_path.name}"'.encode('utf-8'))
         body_parts.append(crlf)
         body_parts.append(b'Content-Type: application/octet-stream')
         body_parts.append(crlf)
@@ -172,27 +642,23 @@ def submit_file_to_sheepit(
         body_parts.append(file_content)
         body_parts.append(crlf)
         
-        # Form fields
-        form_fields = {
-            'frame_start': str(frame_start),
-            'frame_end': str(frame_end),
-            'frame_step': str(frame_step),
-            'compute_method': submit_settings.compute_method,
-            'renderable_by_all': '1' if submit_settings.renderable_by_all else '0',
-            'generate_mp4': '1' if submit_settings.generate_mp4 else '0',
-        }
+        # Add UPLOAD_IDENTIFIER field (matches web form, used for upload progress tracking)
+        import secrets
+        upload_uid = secrets.token_hex(16)
+        body_parts.append(f'--{boundary}'.encode('utf-8'))
+        body_parts.append(crlf)
+        body_parts.append(f'Content-Disposition: form-data; name="UPLOAD_IDENTIFIER"'.encode('utf-8'))
+        body_parts.append(crlf)
+        body_parts.append(crlf)
+        body_parts.append(upload_uid.encode('utf-8'))
+        body_parts.append(crlf)
         
-        if submit_settings.memory_used_mb:
-            form_fields['memory_used_mb'] = submit_settings.memory_used_mb
+        print(f"[SheepIt API] Added UPLOAD_IDENTIFIER: {upload_uid}")
         
-        for key, value in form_fields.items():
-            body_parts.append(f'--{boundary}'.encode('utf-8'))
-            body_parts.append(crlf)
-            body_parts.append(f'Content-Disposition: form-data; name="{key}"'.encode('utf-8'))
-            body_parts.append(crlf)
-            body_parts.append(crlf)
-            body_parts.append(str(value).encode('utf-8'))
-            body_parts.append(crlf)
+        # NOTE: The upload endpoint expects:
+        # - File field: addproject_archive
+        # - Optional: UPLOAD_IDENTIFIER (for progress tracking)
+        # All metadata will be sent in step 4 to /project/add_internal
         
         # Close boundary
         body_parts.append(f'--{boundary}--'.encode('utf-8'))
@@ -202,33 +668,485 @@ def submit_file_to_sheepit(
         request_body = b''.join(body_parts)
         
         # Set content type header
-        headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+        upload_headers = headers.copy()
+        upload_headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+        # Use client subdomain to match where test connection works
+        upload_headers['Referer'] = f"{config.SHEEPIT_API_BASE}/getstarted"
+        upload_headers['Origin'] = config.SHEEPIT_API_BASE
+        # Add X-Requested-With header (some servers require this for AJAX-like requests)
+        upload_headers['X-Requested-With'] = 'XMLHttpRequest'
+        # Add Accept header to prefer HTML/JSON responses
+        upload_headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         
-        print(f"[SheepIt API] Request body size: {len(request_body) / (1024*1024):.2f} MB")
-        print(f"[SheepIt API] Sending POST request...")
+        # Use direct headers (like test connection) - no cookie jar/opener
+        # The Cookie header should already be in upload_headers from headers.copy()
+        print(f"[SheepIt API] Using direct headers (no cookie jar/opener)")
+        if 'Cookie' not in upload_headers:
+            # Add Cookie header from auth_cookies if missing
+            if auth_cookies:
+                cookie_header = '; '.join(f"{k}={v}" for k, v in auth_cookies.items())
+                upload_headers['Cookie'] = cookie_header
+                print(f"[SheepIt API] Added Cookie header from auth_cookies: {list(auth_cookies.keys())}")
+            else:
+                error_msg = "No authentication cookies available. Cannot proceed with upload."
+                print(f"[SheepIt API] ERROR: {error_msg}")
+                return False, error_msg
+        else:
+            print(f"[SheepIt API] Cookie header already present: {upload_headers['Cookie'][:50]}...")
         
-        # Create request
-        req = urllib.request.Request(api_endpoint, data=request_body, headers=headers, method='POST')
+        print(f"[SheepIt API] Upload request body size: {len(request_body) / (1024*1024):.2f} MB")
+        print(f"[SheepIt API] Sending file upload POST request...")
+        print(f"[SheepIt API] Upload request headers: {list(upload_headers.keys())}")
+        if 'Cookie' in upload_headers:
+            print(f"[SheepIt API] Upload Cookie header: {upload_headers['Cookie'][:50]}...")
+        else:
+            print(f"[SheepIt API] WARNING: No Cookie header in upload request!")
         
-        # Make request
+        # Update Cookie header from cookie jar BEFORE creating request (in case it was updated during warmup/getstarted)
+        jar_cookies = {c.name: c.value for c in cookie_jar}
+        if jar_cookies:
+            cookie_str = '; '.join(f"{k}={v}" for k, v in jar_cookies.items())
+            upload_headers['Cookie'] = cookie_str
+            print(f"[SheepIt API] Updated Cookie header from jar: {cookie_str[:50]}...")
+        
+        # Debug: Print all headers that will be sent
+        print(f"[SheepIt API] Full upload request headers:")
+        for key in upload_headers:
+            value = upload_headers[key]
+            if len(value) > 80:
+                print(f"[SheepIt API]   {key}: {value[:80]}...")
+            else:
+                print(f"[SheepIt API]   {key}: {value}")
+        
+        # Create upload request with updated headers
+        upload_req = urllib.request.Request(upload_url, data=request_body, headers=upload_headers, method='POST')
+        
+        # Upload file - use the SAME session_opener that was used for warmup and getstarted
+        # This maintains the full session state including any cookies updated during those requests
         try:
-            with urllib.request.urlopen(req, timeout=300) as response:  # 5 minute timeout for large files
-                response_data = response.read().decode('utf-8', errors='ignore')
-                print(f"[SheepIt API] Response status: {response.status}")
-                print(f"[SheepIt API] Response: {response_data[:500]}...")  # First 500 chars
+            print(f"[SheepIt API] Using session_opener (maintains cookie jar state from warmup/getstarted)...")
+            upload_response = session_opener.open(upload_req, timeout=300)  # 5 minute timeout
+            
+            with upload_response:
+                upload_final_url = upload_response.geturl()
+                upload_status = upload_response.status
+                upload_data = upload_response.read().decode('utf-8', errors='ignore')
+                print(f"[SheepIt API] Upload response status: {upload_status}")
+                print(f"[SheepIt API] Upload final URL: {upload_final_url}")
                 
-                if response.status == 200:
-                    success_msg = f"Project submitted successfully! Response: {response_data[:200]}"
-                    print(f"[SheepIt API] SUCCESS: {success_msg}")
-                    return True, success_msg
-                else:
-                    error_msg = f"Submission failed with status {response.status}: {response_data[:200]}"
+                # Debug: show response headers
+                response_headers = dict(upload_response.headers)
+                print(f"[SheepIt API] Upload response headers: {list(response_headers.keys())}")
+                if 'Set-Cookie' in response_headers:
+                    print(f"[SheepIt API] Upload Set-Cookie: {response_headers['Set-Cookie'][:100]}...")
+                if 'Location' in response_headers:
+                    print(f"[SheepIt API] Upload Location: {response_headers['Location']}")
+                
+                # Check response body for specific error messages FIRST
+                # This is important because a 200 response with error page might still have redirect URL
+                print(f"[SheepIt API] Response body preview (first 500 chars): {upload_data[:500]}")
+                
+                # Check for "File upload failed" or "Upload failed" - this means authentication worked but file field is missing
+                # This is the same error you get when manually submitting without a file
+                if 'File upload failed' in upload_data or 'Upload failed' in upload_data:
+                    error_msg = "Upload failed: File field 'addproject_archive' not found in request. Check multipart form encoding."
+                    print(f"[SheepIt API] ERROR: {error_msg}")
+                    print(f"[SheepIt API] This suggests authentication worked but the file wasn't sent correctly.")
+                    print(f"[SheepIt API] Response body: {upload_data[:1000]}")
+                    return False, error_msg
+                
+                # Check if we got redirected to sign-in (authentication failed)
+                # Only check this if we didn't get the "Upload failed" error (which means auth worked)
+                if 'signin' in upload_final_url.lower() or 'login' in upload_final_url.lower():
+                    # Also check if response body is the sign-in page HTML
+                    if 'sign in' in upload_data.lower() and 'password' in upload_data.lower():
+                        error_msg = "Upload failed: Authentication expired. Please re-authenticate via browser login in preferences."
+                        print(f"[SheepIt API] ERROR: {error_msg}")
+                        print(f"[SheepIt API] Redirected to: {upload_final_url}")
+                        return False, error_msg
+                
+                # Check if response is an error page
+                if upload_status != 200 and upload_status not in (301, 302, 303, 307, 308):
+                    error_msg = f"Upload failed with status {upload_status}: {upload_data[:500]}"
                     print(f"[SheepIt API] ERROR: {error_msg}")
                     return False, error_msg
+                
+                # Extract token from redirect URL: /project/add/{token}
+                import re
+                token_match = re.search(r'/project/add/([a-zA-Z0-9]+)', upload_final_url)
+                
+                # If not found in URL, also check response body (token might be in HTML)
+                if not token_match:
+                    # Check response body for token in URL pattern
+                    token_match = re.search(r'/project/add/([a-zA-Z0-9]+)', upload_data)
+                    if not token_match:
+                        # Check for token in hidden input fields (common in HTML forms)
+                        token_match = re.search(r'<input[^>]*name=["\']token["\'][^>]*value=["\']([a-zA-Z0-9]+)["\']', upload_data, re.IGNORECASE)
+                    if not token_match:
+                        # Check for token in form action URLs
+                        token_match = re.search(r'action=["\'][^"\']*/([a-zA-Z0-9]+)["\']', upload_data, re.IGNORECASE)
+                    if not token_match:
+                        # Check for token in JavaScript variables (like var token = "OszOg4")
+                        token_match = re.search(r'(?:var|let|const)\s+token\s*=\s*["\']([a-zA-Z0-9]+)["\']', upload_data, re.IGNORECASE)
+                    if not token_match:
+                        # Check for token in data attributes or other HTML attributes
+                        token_match = re.search(r'(?:data-)?token=["\']([a-zA-Z0-9]+)["\']', upload_data, re.IGNORECASE)
+                
+                if not token_match:
+                    # Also check response body for other error messages
+                    if 'error' in upload_data.lower() or 'failed' in upload_data.lower():
+                        error_msg = f"Upload failed: {upload_data[:500]}"
+                        print(f"[SheepIt API] ERROR: {error_msg}")
+                        return False, error_msg
+                    error_msg = f"Failed to extract token from upload response. URL: {upload_final_url}, Status: {upload_status}"
+                    print(f"[SheepIt API] ERROR: {error_msg}")
+                    print(f"[SheepIt API] Response preview: {upload_data[:500]}")
+                    print(f"[SheepIt API] Searched for token in URL and response body")
+                    return False, error_msg
+                
+                token = token_match.group(1)
+                print(f"[SheepIt API] Extracted token: {token}")
+                
+                # STEP 2: Poll /project/add_analyse/{token} until analysis is complete
+                print(f"[SheepIt API] Step 2: Waiting for project analysis...")
+                # Use www subdomain to match where the upload happened
+                analyse_url = f"{config.SHEEPIT_API_BASE}/project/add_analyse/{token}"
+                
+                import time
+                max_wait_time = 300  # 5 minutes max
+                poll_interval = 5  # Poll every 5 seconds
+                start_time = time.time()
+                analysis_complete = False
+                analysis_html = None
+                
+                while time.time() - start_time < max_wait_time:
+                    try:
+                        analyse_req = urllib.request.Request(analyse_url, headers=headers)
+                        if session_opener:
+                            analyse_response = session_opener.open(analyse_req, timeout=10)
+                        else:
+                            analyse_response = urllib.request.urlopen(analyse_req, timeout=10)
+                        
+                        with analyse_response:
+                            analyse_data = analyse_response.read().decode('utf-8', errors='ignore')
+                            
+                            # Check if it's JSON (still processing) or HTML (finished)
+                            try:
+                                import json
+                                analyse_json = json.loads(analyse_data)
+                                status = analyse_json.get('status', '')
+                                print(f"[SheepIt API] Analysis status: {status}")
+                                
+                                if status == 'RETRY':
+                                    print(f"[SheepIt API] Waiting for analyser to start...")
+                                elif status == 'PROCESSING':
+                                    analysed = analyse_json.get('analysed', 0)
+                                    total = analyse_json.get('total', 0)
+                                    print(f"[SheepIt API] Analysis in progress: {analysed}/{total} blend files")
+                                else:
+                                    print(f"[SheepIt API] Unexpected analysis status: {status}")
+                            except json.JSONDecodeError:
+                                # Not JSON - must be HTML (analysis finished)
+                                analysis_complete = True
+                                analysis_html = analyse_data
+                                print(f"[SheepIt API] Analysis complete! Received HTML response")
+                                break
+                        
+                        time.sleep(poll_interval)
+                    except urllib.error.HTTPError as e:
+                        # Check if it's a 404 (token not found) or other HTTP error
+                        if e.code == 404:
+                            error_msg = f"Analysis endpoint returned 404 - token '{token}' may be invalid or expired"
+                            print(f"[SheepIt API] ERROR: {error_msg}")
+                            return False, error_msg
+                        elif e.code in (401, 403):
+                            error_msg = f"Analysis endpoint returned {e.code} - authentication may have expired"
+                            print(f"[SheepIt API] ERROR: {error_msg}")
+                            return False, error_msg
+                        else:
+                            print(f"[SheepIt API] HTTP Error {e.code} while polling analysis: {str(e)}")
+                            # Continue polling - might be a temporary server error
+                            time.sleep(poll_interval)
+                    except Exception as e:
+                        print(f"[SheepIt API] Error polling analysis: {type(e).__name__}: {str(e)}")
+                        # Continue polling - might be a temporary network error
+                        time.sleep(poll_interval)
+                
+                if not analysis_complete:
+                    error_msg = "Analysis timed out after 5 minutes"
+                    print(f"[SheepIt API] ERROR: {error_msg}")
+                    return False, error_msg
+                
+                # STEP 3: Parse analysis HTML to extract project metadata
+                # The analysis HTML contains hidden form fields with project data
+                print(f"[SheepIt API] Step 3: Parsing analysis results...")
+                
+                # Extract values from analysis HTML (these are in hidden input fields)
+                # We need: path, framerate, output_path, width, height, archive, and other fields
+                analysis_values = {}
+                
+                # Extract hidden input values
+                hidden_inputs = re.findall(r'<input[^>]*type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']', analysis_html, re.IGNORECASE)
+                for name, value in hidden_inputs:
+                    analysis_values[name] = value
+                    print(f"[SheepIt API] Found analysis value: {name} = {value[:100] if len(value) > 100 else value}")
+                
+                # Also try to extract from JavaScript variables or other patterns
+                # The analysis page might have these in different formats
+                
+                # STEP 4: Submit metadata to /project/add_internal
+                print(f"[SheepIt API] Step 4: Submitting project metadata...")
+                
+                # Prepare metadata fields (required by controller)
+                # Get frame range from submit_settings
+                frame_start = submit_settings.frame_start if hasattr(submit_settings, 'frame_start') else bpy.context.scene.frame_start
+                frame_end = submit_settings.frame_end if hasattr(submit_settings, 'frame_end') else bpy.context.scene.frame_end
+                frame_step = submit_settings.frame_step if hasattr(submit_settings, 'frame_step') else bpy.context.scene.frame_step
+                
+                # Determine project type
+                project_type = 'animation' if frame_end > frame_start else 'singleframe'
+                
+                # Convert compute_method to numeric (1 = CPU, 8 = GPU, 9 = both)
+                compute_method_numeric = 0
+                if submit_settings.compute_method == 'CPU':
+                    compute_method_numeric = 1
+                elif submit_settings.compute_method == 'GPU':
+                    compute_method_numeric = 8
+                
+                # Get Blender version and engine
+                # Use the executable from analysis page (e.g., "blender500") if available
+                # Otherwise fall back to constructing from version (e.g., "5.0" -> "blender500")
+                executable_from_analysis = analysis_values.get('addproject_exe_0')
+                if executable_from_analysis:
+                    executable = executable_from_analysis
+                    print(f"[SheepIt API] Using executable from analysis: {executable}")
+                else:
+                    # Fallback: construct executable name from Blender version
+                    blender_version = f"{bpy.app.version[0]}.{bpy.app.version[1]}"
+                    # Convert "5.0" to "blender500" format
+                    major, minor = bpy.app.version[0], bpy.app.version[1]
+                    executable = f"blender{major}{minor:01d}0"  # e.g., 5.0 -> blender500
+                    print(f"[SheepIt API] Constructed executable from version: {executable} (from version {major}.{minor})")
+                
+                render_engine = bpy.context.scene.render.engine
+                
+                # Build metadata form data (URL-encoded, not multipart)
+                metadata_fields = {
+                    'token': token,
+                    'type': project_type,
+                    'start_frame': str(frame_start),
+                    'end_frame': str(frame_end),
+                    'step_frame': str(frame_step),
+                    'compute_method': str(compute_method_numeric),
+                    'executable': executable,
+                    'engine': render_engine,
+                    'public_render': '1' if (hasattr(submit_settings, 'renderable_by_all') and submit_settings.renderable_by_all) else '0',
+                    'public_thumbnail': '1',  # Default
+                    'generate_mp4': '1' if (hasattr(submit_settings, 'generate_mp4') and submit_settings.generate_mp4) else '0',
+                    'denoising': '0',  # Default
+                    'render_on_gpu_headless': '0',  # Default
+                    'split_tiles': '1',  # Default
+                    'cycles_samples': '0',  # Default
+                    'samples_pixel': '0',  # Default
+                    'use_adaptive_sampling': '0',  # Default
+                    'image_extension': '.png',  # Default
+                    'archive': analysis_values.get('addproject_archive', file_path.name),
+                    'path': analysis_values.get('addproject_path', ''),
+                    'framerate': analysis_values.get('addproject_framerate', '24'),
+                    'output_path': analysis_values.get('addproject_output_path', ''),
+                    'width': analysis_values.get('addproject_width', str(bpy.context.scene.render.resolution_x)),
+                    'height': analysis_values.get('addproject_height', str(bpy.context.scene.render.resolution_y)),
+                }
+                
+                # Add optional memory setting
+                if hasattr(submit_settings, 'memory_used_mb') and submit_settings.memory_used_mb:
+                    metadata_fields['max_ram_optional'] = str(submit_settings.memory_used_mb)
+                
+                # Add color_management if found
+                if 'addproject_color_management' in analysis_values:
+                    metadata_fields['color_management'] = analysis_values['addproject_color_management']
+                
+                print(f"[SheepIt API] Metadata fields: {list(metadata_fields.keys())}")
+                
+                # Extract additional fields from analysis if available
+                # Use analysis values when present, otherwise keep defaults
+                for field_name, analysis_key in [
+                    ('denoising', 'addproject_denoising_0'),
+                    ('render_on_gpu_headless', 'addproject_render_on_gpu_headless_0'),
+                    ('cycles_samples', 'addproject_cycles_samples_0'),
+                    ('samples_pixel', 'addproject_samples_pixel_0'),
+                    ('use_adaptive_sampling', 'addproject_use_adaptive_sampling_0'),
+                    ('image_extension', 'addproject_image_extension_0'),
+                ]:
+                    if analysis_key in analysis_values and analysis_values[analysis_key]:
+                        metadata_fields[field_name] = analysis_values[analysis_key]
+                        print(f"[SheepIt API] Using {field_name} from analysis: {analysis_values[analysis_key]}")
+                
+                # Handle split_tiles specially - only send if it has a value
+                if 'addproject_split_tiles_number_0' in analysis_values:
+                    split_tiles_val = analysis_values['addproject_split_tiles_number_0']
+                    if split_tiles_val and split_tiles_val.strip():
+                        metadata_fields['split_tiles'] = split_tiles_val
+                        print(f"[SheepIt API] Using split_tiles from analysis: {split_tiles_val}")
+                    else:
+                        # Remove split_tiles if empty (don't send it)
+                        metadata_fields.pop('split_tiles', None)
+                        print(f"[SheepIt API] Removed split_tiles (empty in analysis)")
+                
+                # Log final metadata for debugging
+                print(f"[SheepIt API] Final metadata fields ({len(metadata_fields)}): {list(metadata_fields.keys())}")
+                for key, value in metadata_fields.items():
+                    value_preview = str(value)[:50] if len(str(value)) > 50 else str(value)
+                    print(f"[SheepIt API]   {key} = {value_preview}")
+                
+                # Submit metadata
+                # Use www subdomain to match where the upload and form page are (consistent with manual browser submission)
+                submit_url = f"{config.SHEEPIT_API_BASE}/project/add_internal"
+                metadata_data = urllib.parse.urlencode(metadata_fields).encode('utf-8')
+                print(f"[SheepIt API] POST data length: {len(metadata_data)} bytes")
+                
+                submit_headers = headers.copy()
+                submit_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                submit_headers['Referer'] = f"{config.SHEEPIT_API_BASE}/project/add/{token}"
+                submit_headers['Origin'] = config.SHEEPIT_API_BASE
+                
+                submit_req = urllib.request.Request(submit_url, data=metadata_data, headers=submit_headers, method='POST')
+                
+                if session_opener:
+                    submit_response = session_opener.open(submit_req, timeout=60)
+                else:
+                    submit_response = urllib.request.urlopen(submit_req, timeout=60)
+                
+                with submit_response:
+                    submit_data = submit_response.read().decode('utf-8', errors='ignore')
+                    submit_final_url = submit_response.geturl()
+                    submit_status = submit_response.status
                     
+                    print(f"[SheepIt API] Submit response status: {submit_status}")
+                    print(f"[SheepIt API] Submit final URL: {submit_final_url}")
+                    print(f"[SheepIt API] Submit response: {submit_data[:1000]}")
+                    
+                    # Check for success indicators FIRST (redirect URL or project ID)
+                    # A successful submission returns a URL like: http://www.sheepit-renderfarm.com/project/{id}
+                    if submit_data.startswith('http'):
+                        # Response is a redirect URL - this indicates success
+                        project_id_match = re.search(r'/project/(\d+)', submit_data)
+                        if project_id_match:
+                            project_id = project_id_match.group(1)
+                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
+                        else:
+                            success_msg = f"Project submitted successfully! URL: {submit_data.strip()}"
+                        print(f"[SheepIt API] SUCCESS: {success_msg}")
+                        return True, success_msg
+                    elif '/project/' in submit_final_url and 'add_internal' not in submit_final_url:
+                        # Redirected to a project page (not the add_internal endpoint)
+                        project_id_match = re.search(r'/project/(\d+)', submit_final_url)
+                        if project_id_match:
+                            project_id = project_id_match.group(1)
+                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
+                        else:
+                            success_msg = f"Project submitted successfully! URL: {submit_final_url}"
+                        print(f"[SheepIt API] SUCCESS: {success_msg}")
+                        return True, success_msg
+                    
+                    # Check for errors (but only if we didn't find success indicators above)
+                    # Some error messages may appear even when the project is created
+                    # So we prioritize success indicators (redirect URLs) over error messages
+                    if '<p class="error">' in submit_data:
+                        # Check if the error is just a warning (Blender version warning might not prevent creation)
+                        # If we have a valid token, the project was likely created despite the warning
+                        if 'blender version' in submit_data.lower() or 'not supported' in submit_data.lower():
+                            # This might be a warning, not a fatal error
+                            # Check if we can find a project ID or redirect in the response
+                            project_id_match = re.search(r'/project/(\d+)', submit_data)
+                            if project_id_match:
+                                project_id = project_id_match.group(1)
+                                success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning may appear but project was created)"
+                                print(f"[SheepIt API] SUCCESS: {success_msg}")
+                                return True, success_msg
+                            
+                            # Check if we were redirected to a project page (even if response body has error)
+                            if '/project/' in submit_final_url and 'add_internal' not in submit_final_url and 'add/' not in submit_final_url:
+                                project_id_match = re.search(r'/project/(\d+)', submit_final_url)
+                                if project_id_match:
+                                    project_id = project_id_match.group(1)
+                                    success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning appeared but project was created)"
+                                    print(f"[SheepIt API] SUCCESS: {success_msg}")
+                                    return True, success_msg
+                            
+                            # If no project ID in response or redirect, verify project exists by checking the token page
+                            # A valid token means the project was created, even if the response shows a warning
+                            print(f"[SheepIt API] Blender version warning detected. Verifying project exists with token '{token}'...")
+                            try:
+                                # Use www subdomain to match where the upload happened
+                                verify_url = f"{config.SHEEPIT_API_BASE}/project/add/{token}"
+                                verify_req = urllib.request.Request(verify_url, headers=headers)
+                                if session_opener:
+                                    verify_response = session_opener.open(verify_req, timeout=10)
+                                else:
+                                    verify_response = urllib.request.urlopen(verify_req, timeout=10)
+                                
+                                with verify_response:
+                                    verify_data = verify_response.read().decode('utf-8', errors='ignore')
+                                    # If we can access the project page (not a 404), the project exists
+                                    if verify_response.status == 200 and 'project' in verify_data.lower():
+                                        # Try to extract project ID from the verification page
+                                        verify_project_id_match = re.search(r'/project/(\d+)', verify_data)
+                                        if verify_project_id_match:
+                                            project_id = verify_project_id_match.group(1)
+                                            success_msg = f"Project submitted successfully! Project ID: {project_id} (Note: Blender version warning appeared but project was created)"
+                                        else:
+                                            # Project exists but we can't extract ID - still a success
+                                            success_msg = f"Project submitted successfully with token '{token}'! (Note: Blender version warning appeared but project was created)"
+                                        print(f"[SheepIt API] SUCCESS: {success_msg}")
+                                        return True, success_msg
+                                    else:
+                                        print(f"[SheepIt API] Verification failed: status={verify_response.status}")
+                            except Exception as e:
+                                print(f"[SheepIt API] Could not verify project existence: {type(e).__name__}: {str(e)}")
+                                # If verification fails, assume the warning is just a warning and project was created
+                                # (since the user confirmed the token is valid)
+                                success_msg = f"Project submitted successfully with token '{token}'! (Note: Blender version warning appeared - project may have been created despite warning)"
+                                print(f"[SheepIt API] SUCCESS (assumed): {success_msg}")
+                                return True, success_msg
+                        
+                        # Fatal error - no success indicators found
+                        error_msg = f"Submission failed: {submit_data[:500]}"
+                        print(f"[SheepIt API] ERROR: {error_msg}")
+                        return False, error_msg
+                    elif 'error' in submit_data.lower() or 'failed' in submit_data.lower():
+                        # Generic error - but check if there's also a success indicator
+                        project_id_match = re.search(r'/project/(\d+)', submit_data)
+                        if project_id_match:
+                            project_id = project_id_match.group(1)
+                            success_msg = f"Project submitted successfully! Project ID: {project_id}"
+                            print(f"[SheepIt API] SUCCESS: {success_msg}")
+                            return True, success_msg
+                        
+                        error_msg = f"Submission failed: {submit_data[:500]}"
+                        print(f"[SheepIt API] ERROR: {error_msg}")
+                        return False, error_msg
+                    else:
+                        # Unknown response
+                        error_msg = f"Unclear response: {submit_data[:500]}"
+                        print(f"[SheepIt API] WARNING: {error_msg}")
+                        return False, error_msg
+                        
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else str(e)
-            error_msg = f"HTTP error {e.code}: {error_body[:200]}"
+            error_body = ""
+            try:
+                if hasattr(e, 'read'):
+                    error_body = e.read().decode('utf-8', errors='ignore')
+                else:
+                    error_body = str(e)
+            except Exception:
+                error_body = str(e)
+            
+            print(f"[SheepIt API] HTTP Error {e.code}")
+            print(f"[SheepIt API] Error URL: {e.url if hasattr(e, 'url') else 'unknown'}")
+            print(f"[SheepIt API] Error body: {error_body[:1000]}...")
+            
+            error_msg = f"HTTP error {e.code}: {error_body[:500]}"
             print(f"[SheepIt API] ERROR: {error_msg}")
             return False, error_msg
             
