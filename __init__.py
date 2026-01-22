@@ -94,6 +94,28 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         description="Path to the packed output directory",
         default="",
     )
+    
+    # Progress tracking for submission operations
+    is_submitting: bpy.props.BoolProperty(
+        name="Is Submitting",
+        description="Whether a submission is currently in progress",
+        default=False,
+    )
+    
+    submit_progress: bpy.props.FloatProperty(
+        name="Submit Progress",
+        description="Progress percentage for submission operations",
+        default=0.0,
+        min=0.0,
+        max=100.0,
+        subtype='PERCENTAGE',
+    )
+    
+    submit_status_message: bpy.props.StringProperty(
+        name="Submit Status Message",
+        description="Current status message for submission operations",
+        default="",
+    )
 
 
 def register():

@@ -39,6 +39,13 @@ class SHEEPIT_PT_output_panel(Panel):
         
         layout.separator()
         
+        # Progress Bar Section (when submitting)
+        if submit_settings.is_submitting:
+            box = layout.box()
+            box.label(text=submit_settings.submit_status_message, icon='TIME')
+            box.prop(submit_settings, "submit_progress", text="Progress", slider=True)
+            layout.separator()
+        
         # Submission Buttons
         col = layout.column()
         col.scale_y = 1.5

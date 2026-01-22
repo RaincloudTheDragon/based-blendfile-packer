@@ -103,88 +103,222 @@ class SHEEPIT_OT_submit_current(Operator):
     bl_description = "Submit the current blend file to SheepIt without packing (for already-packed files or test submissions)"
     bl_options = {'REGISTER', 'UNDO'}
     
-    def execute(self, context):
-        print(f"[SheepIt Submit] Starting submission of current blend file...")
-        
+    def invoke(self, context, event):
+        """Initialize modal operator with timer."""
         submit_settings = context.scene.sheepit_submit
         
-        # Save current blend state to temp file with frame range applied
-        try:
-            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
-            print(f"[SheepIt Submit] Using temp blend file: {temp_blend_path}")
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to save current blend state: {str(e)}")
+        # Check if already submitting
+        if submit_settings.is_submitting:
+            self.report({'WARNING'}, "A submission is already in progress.")
             return {'CANCELLED'}
         
-        # Get preferences for authentication
-        from ..utils.compat import get_addon_prefs
-        from ..utils.auth import load_auth_cookies
-        from .api_submit import submit_file_to_sheepit
+        # Initialize progress properties
+        submit_settings.is_submitting = True
+        submit_settings.submit_progress = 0.0
+        submit_settings.submit_status_message = "Initializing..."
         
-        sheepit_prefs = get_addon_prefs()
-        if not sheepit_prefs:
-            self.report({'ERROR'}, "Addon preferences not found. Please configure SheepIt credentials in preferences.")
-            # Clean up temp file
-            try:
-                temp_blend_path.unlink()
-                temp_blend_path.parent.rmdir()
-            except Exception:
-                pass
+        # Initialize phase tracking
+        self._phase = 'INIT'
+        self._temp_blend_path = None
+        self._temp_dir = None
+        self._auth_cookies = None
+        self._username = None
+        self._password = None
+        self._success = False
+        self._message = ""
+        self._error = None
+        
+        # Create timer for modal updates
+        self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
+        
+        # Force UI redraw
+        for area in context.screen.areas:
+            if area.type == 'PROPERTIES':
+                area.tag_redraw()
+        
+        # Start modal operation
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def modal(self, context, event):
+        """Handle modal events and update progress."""
+        submit_settings = context.scene.sheepit_submit
+        
+        # Handle ESC key to cancel
+        if event.type == 'ESC':
+            self._cleanup(context, cancelled=True)
+            self.report({'INFO'}, "Submission cancelled.")
             return {'CANCELLED'}
         
-        # Get authentication
-        auth_cookies = None
-        username = None
-        password = None
-        
-        if sheepit_prefs.use_browser_login:
-            auth_cookies = load_auth_cookies()
-            if not auth_cookies:
-                self.report({'ERROR'}, "No browser login session found. Please login via browser in preferences.")
-                # Clean up temp file
-                try:
-                    temp_blend_path.unlink()
-                    temp_blend_path.parent.rmdir()
-                except Exception:
-                    pass
-                return {'CANCELLED'}
-        else:
-            if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
-                self.report({'ERROR'}, "Please configure SheepIt username and password in preferences.")
-                # Clean up temp file
-                try:
-                    temp_blend_path.unlink()
-                    temp_blend_path.parent.rmdir()
-                except Exception:
-                    pass
-                return {'CANCELLED'}
-            username = sheepit_prefs.sheepit_username
-            password = sheepit_prefs.sheepit_password
-        
-        # Submit temp file
-        success, message = submit_file_to_sheepit(
-            temp_blend_path,
-            submit_settings,
-            auth_cookies=auth_cookies,
-            username=username,
-            password=password
-        )
-        
-        # Clean up temp file on success (leave for debugging on failure)
-        if success:
+        # Handle timer events
+        if event.type == 'TIMER':
             try:
-                temp_blend_path.unlink()
-                temp_blend_path.parent.rmdir()
-                print(f"[SheepIt Submit] Cleaned up temp file: {temp_blend_path}")
+                if self._phase == 'INIT':
+                    submit_settings.submit_progress = 0.0
+                    submit_settings.submit_status_message = "Initializing..."
+                    self._phase = 'SAVING_BLEND'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'SAVING_BLEND':
+                    submit_settings.submit_progress = 10.0
+                    submit_settings.submit_status_message = "Saving current blend state..."
+                    
+                    # Save current blend state to temp file with frame range applied
+                    try:
+                        self._temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+                        self._temp_dir = self._temp_blend_path.parent
+                        print(f"[SheepIt Submit] Using temp blend file: {self._temp_blend_path}")
+                    except Exception as e:
+                        self._error = f"Failed to save current blend state: {str(e)}"
+                        self._cleanup(context, cancelled=True)
+                        self.report({'ERROR'}, self._error)
+                        return {'CANCELLED'}
+                    
+                    self._phase = 'APPLYING_FRAME_RANGE'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'APPLYING_FRAME_RANGE':
+                    submit_settings.submit_progress = 20.0
+                    submit_settings.submit_status_message = "Frame range applied."
+                    # Frame range is already applied in save_current_blend_with_frame_range
+                    self._phase = 'AUTHENTICATING'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'AUTHENTICATING':
+                    submit_settings.submit_progress = 25.0
+                    submit_settings.submit_status_message = "Authenticating..."
+                    
+                    # Get preferences for authentication
+                    from ..utils.compat import get_addon_prefs
+                    from ..utils.auth import load_auth_cookies
+                    
+                    sheepit_prefs = get_addon_prefs()
+                    if not sheepit_prefs:
+                        self._error = "Addon preferences not found. Please configure SheepIt credentials in preferences."
+                        self._cleanup(context, cancelled=True)
+                        self.report({'ERROR'}, self._error)
+                        return {'CANCELLED'}
+                    
+                    # Get authentication
+                    if sheepit_prefs.use_browser_login:
+                        self._auth_cookies = load_auth_cookies()
+                        if not self._auth_cookies:
+                            self._error = "No browser login session found. Please login via browser in preferences."
+                            self._cleanup(context, cancelled=True)
+                            self.report({'ERROR'}, self._error)
+                            return {'CANCELLED'}
+                    else:
+                        if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
+                            self._error = "Please configure SheepIt username and password in preferences."
+                            self._cleanup(context, cancelled=True)
+                            self.report({'ERROR'}, self._error)
+                            return {'CANCELLED'}
+                        self._username = sheepit_prefs.sheepit_username
+                        self._password = sheepit_prefs.sheepit_password
+                    
+                    self._phase = 'UPLOADING'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'UPLOADING':
+                    submit_settings.submit_progress = 30.0
+                    submit_settings.submit_status_message = "Uploading to SheepIt..."
+                    
+                    # Submit temp file
+                    from .api_submit import submit_file_to_sheepit
+                    
+                    self._success, self._message = submit_file_to_sheepit(
+                        self._temp_blend_path,
+                        submit_settings,
+                        auth_cookies=self._auth_cookies,
+                        username=self._username,
+                        password=self._password
+                    )
+                    
+                    if self._success:
+                        submit_settings.submit_progress = 90.0
+                        submit_settings.submit_status_message = "Upload complete!"
+                        self._phase = 'OPENING_BROWSER'
+                    else:
+                        self._error = self._message
+                        self._cleanup(context, cancelled=True)
+                        self.report({'ERROR'}, self._error)
+                        return {'CANCELLED'}
+                    
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'OPENING_BROWSER':
+                    submit_settings.submit_progress = 95.0
+                    submit_settings.submit_status_message = "Opening browser..."
+                    # Browser is already opened by submit_file_to_sheepit
+                    self._phase = 'CLEANUP'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'CLEANUP':
+                    submit_settings.submit_progress = 98.0
+                    submit_settings.submit_status_message = "Cleaning up..."
+                    
+                    # Clean up temp file on success
+                    if self._temp_blend_path and self._temp_blend_path.exists():
+                        try:
+                            self._temp_blend_path.unlink()
+                            if self._temp_dir and self._temp_dir.exists():
+                                try:
+                                    self._temp_dir.rmdir()
+                                except Exception:
+                                    pass  # Directory may not be empty
+                            print(f"[SheepIt Submit] Cleaned up temp file: {self._temp_blend_path}")
+                        except Exception as e:
+                            print(f"[SheepIt Submit] WARNING: Could not clean up temp file: {e}")
+                    
+                    self._phase = 'COMPLETE'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'COMPLETE':
+                    submit_settings.submit_progress = 100.0
+                    submit_settings.submit_status_message = "Submission complete!"
+                    
+                    # Small delay to show completion
+                    import time
+                    time.sleep(0.2)
+                    
+                    self._cleanup(context, cancelled=False)
+                    self.report({'INFO'}, self._message)
+                    return {'FINISHED'}
+                
             except Exception as e:
-                print(f"[SheepIt Submit] WARNING: Could not clean up temp file: {e}")
-            self.report({'INFO'}, message)
-            return {'FINISHED'}
+                import traceback
+                traceback.print_exc()
+                self._error = f"Submission failed: {type(e).__name__}: {str(e)}"
+                self._cleanup(context, cancelled=True)
+                self.report({'ERROR'}, self._error)
+                return {'CANCELLED'}
+        
+        return {'RUNNING_MODAL'}
+    
+    def _cleanup(self, context, cancelled=False):
+        """Clean up progress properties and timer."""
+        submit_settings = context.scene.sheepit_submit
+        
+        # Remove timer
+        if hasattr(self, '_timer') and self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+        
+        # Reset progress properties
+        submit_settings.is_submitting = False
+        submit_settings.submit_progress = 0.0
+        if cancelled and self._error:
+            submit_settings.submit_status_message = self._error
         else:
-            # Leave temp file for debugging on failure
-            print(f"[SheepIt Submit] Temp file left for debugging: {temp_blend_path}")
-            self.report({'ERROR'}, message)
-            return {'CANCELLED'}
+            submit_settings.submit_status_message = ""
+        
+        # Force UI redraw
+        for area in context.screen.areas:
+            if area.type == 'PROPERTIES':
+                area.tag_redraw()
+    
+    def execute(self, context):
+        """Legacy execute method - redirects to invoke for modal operation."""
+        return self.invoke(context, None)
 
 
 def create_zip_from_directory(directory: Path, output_zip: Path) -> None:
