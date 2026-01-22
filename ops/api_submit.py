@@ -44,9 +44,26 @@ def submit_file_to_sheepit(
         print(f"[SheepIt API] ERROR: {error_msg}")
         return False, error_msg
     
+    # 2GB limit (2 * 1024 * 1024 * 1024 bytes)
+    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+    
     file_size = file_path.stat().st_size
     file_size_mb = file_size / (1024 * 1024)
-    print(f"[SheepIt API] File size: {file_size_mb:.2f} MB ({file_size:,} bytes)")
+    file_size_gb = file_size / (1024 * 1024 * 1024)
+    print(f"[SheepIt API] File size: {file_size_mb:.2f} MB ({file_size_gb:.2f} GB, {file_size:,} bytes)")
+    
+    if file_size > MAX_FILE_SIZE:
+        error_msg = (
+            f"File size ({file_size_gb:.2f} GB) exceeds 2GB limit. Cannot submit.\n\n"
+            "To reduce file size, consider:\n"
+            "- Optimizing the scene (reduce geometry, simplify materials)\n"
+            "- Optimizing asset files (compress textures, reduce resolution)\n"
+            "- Splitting the frame range (render in smaller chunks)\n"
+            "- Truncating caches to match your selected frame range\n"
+            "  (Note: Caches are automatically truncated to your selected frame range during packing)"
+        )
+        print(f"[SheepIt API] ERROR: {error_msg}")
+        return False, error_msg
     
     # Initialize cookie jar and opener (will be created if needed)
     cookie_jar = None

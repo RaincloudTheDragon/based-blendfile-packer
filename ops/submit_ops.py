@@ -216,6 +216,37 @@ class SHEEPIT_OT_submit_current(Operator):
                         self._username = sheepit_prefs.sheepit_username
                         self._password = sheepit_prefs.sheepit_password
                     
+                    self._phase = 'VALIDATING_FILE_SIZE'
+                    return {'RUNNING_MODAL'}
+                
+                elif self._phase == 'VALIDATING_FILE_SIZE':
+                    submit_settings.submit_progress = 27.0
+                    submit_settings.submit_status_message = "Validating file size before upload..."
+                    
+                    # Check blend file size
+                    if self._temp_blend_path and self._temp_blend_path.exists():
+                        blend_size = self._temp_blend_path.stat().st_size
+                        blend_size_gb = blend_size / (1024 * 1024 * 1024)
+                        MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+                        
+                        print(f"[SheepIt Submit] Blend file size: {blend_size_gb:.2f} GB")
+                        
+                        if blend_size > MAX_FILE_SIZE:
+                            error_msg = (
+                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds 2GB limit. Cannot submit.\n\n"
+                                "To reduce file size, consider:\n"
+                                "- Optimizing the scene (reduce geometry, simplify materials)\n"
+                                "- Optimizing asset files (compress textures, reduce resolution)\n"
+                                "- Splitting the frame range (render in smaller chunks)\n"
+                                "- Truncating caches to match your selected frame range\n"
+                                "  (Note: Caches are automatically truncated to your selected frame range during packing)"
+                            )
+                            print(f"[SheepIt Submit] ERROR: {error_msg}")
+                            self._error = error_msg
+                            self._cleanup(context, cancelled=True)
+                            self.report({'ERROR'}, self._error)
+                            return {'CANCELLED'}
+                    
                     self._phase = 'UPLOADING'
                     return {'RUNNING_MODAL'}
                 
@@ -321,51 +352,71 @@ class SHEEPIT_OT_submit_current(Operator):
         return self.invoke(context, None)
 
 
-def create_zip_from_directory(directory: Path, output_zip: Path) -> None:
-    """Create a ZIP file from a directory."""
+def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None) -> None:
+    """Create a ZIP file from a directory.
+    
+    Args:
+        directory: Directory to zip
+        output_zip: Output ZIP file path
+        progress_callback: Optional callback(progress_pct, message) for progress updates
+        cancel_check: Optional callback() -> bool to check for cancellation
+    """
     import time
     
     print(f"[SheepIt Submit] Starting ZIP creation...")
     print(f"[SheepIt Submit]   Directory: {directory}")
     print(f"[SheepIt Submit]   Output: {output_zip}")
     
+    if progress_callback:
+        progress_callback(0.0, "Counting files...")
+    
     # Count files first
     file_count = 0
     total_size = 0
+    file_list = []  # Store file list for progress tracking
     for root, dirs, files in os.walk(directory):
         for file in files:
             file_path = Path(root) / file
             if file_path.exists():
                 file_count += 1
                 total_size += file_path.stat().st_size
+                file_list.append((file_path, file_path.relative_to(directory)))
     
     print(f"[SheepIt Submit]   Found {file_count} files, total size: {total_size / (1024*1024):.2f} MB")
     print(f"[SheepIt Submit]   Creating ZIP (this may take a while)...")
     
+    if progress_callback:
+        progress_callback(1.0, f"Creating ZIP archive ({file_count} files, {total_size / (1024*1024):.1f} MB)...")
+    
     start_time = time.time()
     files_added = 0
     
-    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                file_path = Path(root) / file
-                if not file_path.exists():
-                    continue
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_STORED) as zipf:
+        for file_path, arcname in file_list:
+            if cancel_check and cancel_check():
+                raise InterruptedError("ZIP creation cancelled by user")
+            
+            if not file_path.exists():
+                continue
+            
+            try:
+                zipf.write(file_path, arcname)
+                files_added += 1
                 
-                arcname = file_path.relative_to(directory)
-                try:
-                    zipf.write(file_path, arcname)
-                    files_added += 1
-                    
-                    # Progress updates
-                    if files_added == 1:
-                        print(f"[SheepIt Submit]   Adding files to ZIP...")
-                    elif files_added % 100 == 0:
-                        elapsed = time.time() - start_time
-                        rate = files_added / elapsed if elapsed > 0 else 0
-                        print(f"[SheepIt Submit]   Progress: {files_added}/{file_count} files ({files_added*100//file_count}%), {rate:.1f} files/sec")
-                except Exception as e:
-                    print(f"[SheepIt Submit]   WARNING: Failed to add {arcname}: {type(e).__name__}: {str(e)}")
+                # Progress updates - more frequent for large files
+                if files_added == 1:
+                    print(f"[SheepIt Submit]   Adding files to ZIP...")
+                    if progress_callback:
+                        progress_callback(2.0, f"Adding files to ZIP... (1/{file_count})")
+                elif files_added % 10 == 0 or (file_count > 0 and files_added % max(1, file_count // 100) == 0):
+                    elapsed = time.time() - start_time
+                    rate = files_added / elapsed if elapsed > 0 else 0
+                    progress_pct = 2.0 + (files_added / file_count * 93.0) if file_count > 0 else 2.0
+                    print(f"[SheepIt Submit]   Progress: {files_added}/{file_count} files ({files_added*100//file_count}%), {rate:.1f} files/sec")
+                    if progress_callback:
+                        progress_callback(progress_pct, f"Creating ZIP... ({files_added}/{file_count} files, {rate:.1f} files/sec)")
+            except Exception as e:
+                print(f"[SheepIt Submit]   WARNING: Failed to add {arcname}: {type(e).__name__}: {str(e)}")
     
     elapsed = time.time() - start_time
     print(f"[SheepIt Submit] ZIP creation completed!")
@@ -373,6 +424,9 @@ def create_zip_from_directory(directory: Path, output_zip: Path) -> None:
     print(f"[SheepIt Submit]   Time taken: {elapsed:.2f} seconds")
     if elapsed > 0:
         print(f"[SheepIt Submit]   Average rate: {files_added/elapsed:.1f} files/sec")
+    
+    if progress_callback:
+        progress_callback(100.0, "ZIP archive created")
 
 
 def register():
