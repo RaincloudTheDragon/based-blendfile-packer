@@ -554,11 +554,40 @@ class SHEEPIT_OT_pack_zip(Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
+        submit_settings = context.scene.sheepit_submit
+        original_filepath = bpy.data.filepath
+        temp_blend_path = None
+        temp_dir = None
+        
         try:
-            # Pack project
+            # Save current blend state to temp file with frame range applied
+            from .submit_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
+            print(f"[SheepIt Pack] Saving current blend state with frame range...")
+            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+            temp_dir = temp_blend_path.parent
+            print(f"[SheepIt Pack] Saved to temp file: {temp_blend_path}")
+            print(f"[SheepIt Pack] Frame range: {frame_start} - {frame_end} (step: {frame_step})")
+            
+            # Temporarily set bpy.data.filepath so pack_project uses the temp file
+            bpy.data.filepath = str(temp_blend_path)
+            print(f"[SheepIt Pack] Temporarily set bpy.data.filepath to: {temp_blend_path}")
+            
+            # Pack project (will use temp file as source)
             target_path, _ = pack_project(WorkflowMode.COPY_ONLY, enable_nla=True)
             print(f"[SheepIt Pack] Packed to: {target_path}")
             context.scene.sheepit_submit.pack_output_path = str(target_path)
+            
+            # Apply frame range to all blend files in the packed directory
+            print(f"[SheepIt Pack] Applying frame range to blend files in packed directory...")
+            blend_files = list(target_path.rglob("*.blend"))
+            for blend_file in blend_files:
+                if blend_file.exists():
+                    print(f"[SheepIt Pack]   Applying frame range to: {blend_file.name}")
+                    apply_frame_range_to_blend(blend_file, frame_start, frame_end, frame_step)
+            
+            # Restore original filepath
+            bpy.data.filepath = original_filepath
+            print(f"[SheepIt Pack] Restored original bpy.data.filepath")
             
             # Create ZIP
             from .submit_ops import create_zip_from_directory
@@ -603,16 +632,36 @@ class SHEEPIT_OT_pack_zip(Operator):
             )
             
             if success:
+                # Clean up temp file on success
+                if temp_blend_path and temp_blend_path.exists():
+                    try:
+                        temp_blend_path.unlink()
+                        if temp_dir and temp_dir.exists():
+                            try:
+                                temp_dir.rmdir()
+                            except Exception:
+                                pass  # Directory may not be empty
+                        print(f"[SheepIt Pack] Cleaned up temp file: {temp_blend_path}")
+                    except Exception as e:
+                        print(f"[SheepIt Pack] WARNING: Could not clean up temp file: {e}")
                 self.report({'INFO'}, message)
                 return {'FINISHED'}
             else:
+                # Leave temp file for debugging on failure
+                if temp_blend_path:
+                    print(f"[SheepIt Pack] Temp file left for debugging: {temp_blend_path}")
                 self.report({'ERROR'}, message)
                 return {'CANCELLED'}
                 
         except Exception as e:
+            # Restore original filepath on error
+            bpy.data.filepath = original_filepath
             print(f"[SheepIt Pack] ERROR: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
+            # Leave temp file for debugging
+            if temp_blend_path:
+                print(f"[SheepIt Pack] Temp file left for debugging: {temp_blend_path}")
             self.report({'ERROR'}, f"Packing failed: {str(e)}")
             return {'CANCELLED'}
 
@@ -625,15 +674,42 @@ class SHEEPIT_OT_pack_blend(Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
+        submit_settings = context.scene.sheepit_submit
+        original_filepath = bpy.data.filepath
+        temp_blend_path = None
+        temp_dir = None
+        
         try:
-            # Pack project
+            # Save current blend state to temp file with frame range applied
+            from .submit_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
+            print(f"[SheepIt Pack] Saving current blend state with frame range...")
+            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+            temp_dir = temp_blend_path.parent
+            print(f"[SheepIt Pack] Saved to temp file: {temp_blend_path}")
+            print(f"[SheepIt Pack] Frame range: {frame_start} - {frame_end} (step: {frame_step})")
+            
+            # Temporarily set bpy.data.filepath so pack_project uses the temp file
+            bpy.data.filepath = str(temp_blend_path)
+            print(f"[SheepIt Pack] Temporarily set bpy.data.filepath to: {temp_blend_path}")
+            
+            # Pack project (will use temp file as source)
             target_path, blend_path = pack_project(WorkflowMode.PACK_AND_SAVE, enable_nla=True)
             print(f"[SheepIt Pack] Packed to: {target_path}")
             context.scene.sheepit_submit.pack_output_path = str(target_path)
             
             if not blend_path or not blend_path.exists():
+                # Restore original filepath before returning
+                bpy.data.filepath = original_filepath
                 self.report({'ERROR'}, "Could not find target blend file for submission.")
                 return {'CANCELLED'}
+            
+            # Apply frame range to the target blend file before submission
+            print(f"[SheepIt Pack] Applying frame range to target blend file: {blend_path.name}")
+            apply_frame_range_to_blend(blend_path, frame_start, frame_end, frame_step)
+            
+            # Restore original filepath
+            bpy.data.filepath = original_filepath
+            print(f"[SheepIt Pack] Restored original bpy.data.filepath")
             
             # Submit via API
             from .api_submit import submit_file_to_sheepit
@@ -672,16 +748,36 @@ class SHEEPIT_OT_pack_blend(Operator):
             )
             
             if success:
+                # Clean up temp file on success
+                if temp_blend_path and temp_blend_path.exists():
+                    try:
+                        temp_blend_path.unlink()
+                        if temp_dir and temp_dir.exists():
+                            try:
+                                temp_dir.rmdir()
+                            except Exception:
+                                pass  # Directory may not be empty
+                        print(f"[SheepIt Pack] Cleaned up temp file: {temp_blend_path}")
+                    except Exception as e:
+                        print(f"[SheepIt Pack] WARNING: Could not clean up temp file: {e}")
                 self.report({'INFO'}, message)
                 return {'FINISHED'}
             else:
+                # Leave temp file for debugging on failure
+                if temp_blend_path:
+                    print(f"[SheepIt Pack] Temp file left for debugging: {temp_blend_path}")
                 self.report({'ERROR'}, message)
                 return {'CANCELLED'}
                 
         except Exception as e:
+            # Restore original filepath on error
+            bpy.data.filepath = original_filepath
             print(f"[SheepIt Pack] ERROR: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
+            # Leave temp file for debugging
+            if temp_blend_path:
+                print(f"[SheepIt Pack] Temp file left for debugging: {temp_blend_path}")
             self.report({'ERROR'}, f"Packing failed: {str(e)}")
             return {'CANCELLED'}
 

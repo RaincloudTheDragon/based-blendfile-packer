@@ -4,13 +4,96 @@ Submission operations for SheepIt render farm.
 
 import os
 import zipfile
+import tempfile
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import bpy
 from bpy.types import Operator
 
 from .. import config
+
+
+def apply_frame_range_to_blend(blend_path: Path, frame_start: int, frame_end: int, frame_step: int) -> None:
+    """
+    Apply frame range settings to a blend file using subprocess.
+    
+    Args:
+        blend_path: Path to the blend file to modify
+        frame_start: Start frame value
+        frame_end: End frame value
+        frame_step: Frame step value
+    """
+    script = f"""
+import bpy
+for scene in bpy.data.scenes:
+    scene.frame_start = {frame_start}
+    scene.frame_end = {frame_end}
+    scene.frame_step = {frame_step}
+bpy.ops.wm.save_mainfile()
+print(f'Applied frame range {frame_start}-{frame_end} (step {frame_step}) to all scenes')
+"""
+    
+    result = subprocess.run([
+        "blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script
+    ], capture_output=True, text=True, check=False)
+    
+    if result.returncode != 0:
+        print(f"[SheepIt Submit] WARNING: Failed to apply frame range to {blend_path.name}")
+        if result.stderr:
+            print(f"[SheepIt Submit]   Error: {result.stderr[:200]}")
+    else:
+        print(f"[SheepIt Submit] Applied frame range {frame_start}-{frame_end} (step {frame_step}) to {blend_path.name}")
+
+
+def save_current_blend_with_frame_range(submit_settings, temp_dir: Optional[Path] = None) -> Tuple[Path, int, int, int]:
+    """
+    Save current blend state to a temporary file and apply frame range from submit_settings.
+    
+    Args:
+        submit_settings: Submit settings containing frame range configuration
+        temp_dir: Optional temporary directory (if None, creates a new one)
+    
+    Returns:
+        Tuple of (temp_blend_path, frame_start, frame_end, frame_step)
+    """
+    # Determine frame range from submit_settings
+    if submit_settings.frame_range_mode == 'FULL':
+        frame_start = bpy.context.scene.frame_start
+        frame_end = bpy.context.scene.frame_end
+        frame_step = bpy.context.scene.frame_step
+    else:
+        frame_start = submit_settings.frame_start
+        frame_end = submit_settings.frame_end
+        frame_step = submit_settings.frame_step
+    
+    # Create temp directory if not provided
+    if temp_dir is None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="sheepit_submit_"))
+    
+    # Generate temp blend filename
+    blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
+    blend_name = Path(blend_name).stem if blend_name else "untitled"
+    temp_blend = temp_dir / f"{blend_name}.blend"
+    
+    print(f"[SheepIt Submit] Saving current blend state to: {temp_blend}")
+    print(f"[SheepIt Submit] Frame range: {frame_start} - {frame_end} (step: {frame_step})")
+    
+    # Save current blend state
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        bpy.ops.wm.save_as_mainfile(filepath=str(temp_blend), copy=True)
+        print(f"[SheepIt Submit] Saved current blend state to temp file")
+    except Exception as e:
+        error_msg = f"Failed to save current blend state: {type(e).__name__}: {str(e)}"
+        print(f"[SheepIt Submit] ERROR: {error_msg}")
+        raise RuntimeError(error_msg) from e
+    
+    # Apply frame range to the saved file
+    apply_frame_range_to_blend(temp_blend, frame_start, frame_end, frame_step)
+    
+    return temp_blend, frame_start, frame_end, frame_step
 
 
 class SHEEPIT_OT_submit_current(Operator):
@@ -23,17 +106,15 @@ class SHEEPIT_OT_submit_current(Operator):
     def execute(self, context):
         print(f"[SheepIt Submit] Starting submission of current blend file...")
         
-        # Check if file is saved
-        if not bpy.data.filepath:
-            self.report({'ERROR'}, "Please save the blend file before submitting.")
-            return {'CANCELLED'}
+        submit_settings = context.scene.sheepit_submit
         
-        blend_path = Path(bpy.data.filepath)
-        if not blend_path.exists():
-            self.report({'ERROR'}, f"Blend file does not exist: {blend_path}")
+        # Save current blend state to temp file with frame range applied
+        try:
+            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+            print(f"[SheepIt Submit] Using temp blend file: {temp_blend_path}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to save current blend state: {str(e)}")
             return {'CANCELLED'}
-        
-        print(f"[SheepIt Submit] Submitting: {blend_path}")
         
         # Get preferences for authentication
         from ..utils.compat import get_addon_prefs
@@ -43,6 +124,12 @@ class SHEEPIT_OT_submit_current(Operator):
         sheepit_prefs = get_addon_prefs()
         if not sheepit_prefs:
             self.report({'ERROR'}, "Addon preferences not found. Please configure SheepIt credentials in preferences.")
+            # Clean up temp file
+            try:
+                temp_blend_path.unlink()
+                temp_blend_path.parent.rmdir()
+            except Exception:
+                pass
             return {'CANCELLED'}
         
         # Get authentication
@@ -54,27 +141,48 @@ class SHEEPIT_OT_submit_current(Operator):
             auth_cookies = load_auth_cookies()
             if not auth_cookies:
                 self.report({'ERROR'}, "No browser login session found. Please login via browser in preferences.")
+                # Clean up temp file
+                try:
+                    temp_blend_path.unlink()
+                    temp_blend_path.parent.rmdir()
+                except Exception:
+                    pass
                 return {'CANCELLED'}
         else:
             if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
                 self.report({'ERROR'}, "Please configure SheepIt username and password in preferences.")
+                # Clean up temp file
+                try:
+                    temp_blend_path.unlink()
+                    temp_blend_path.parent.rmdir()
+                except Exception:
+                    pass
                 return {'CANCELLED'}
             username = sheepit_prefs.sheepit_username
             password = sheepit_prefs.sheepit_password
         
-        # Submit
+        # Submit temp file
         success, message = submit_file_to_sheepit(
-            blend_path,
-            context.scene.sheepit_submit,
+            temp_blend_path,
+            submit_settings,
             auth_cookies=auth_cookies,
             username=username,
             password=password
         )
         
+        # Clean up temp file on success (leave for debugging on failure)
         if success:
+            try:
+                temp_blend_path.unlink()
+                temp_blend_path.parent.rmdir()
+                print(f"[SheepIt Submit] Cleaned up temp file: {temp_blend_path}")
+            except Exception as e:
+                print(f"[SheepIt Submit] WARNING: Could not clean up temp file: {e}")
             self.report({'INFO'}, message)
             return {'FINISHED'}
         else:
+            # Leave temp file for debugging on failure
+            print(f"[SheepIt Submit] Temp file left for debugging: {temp_blend_path}")
             self.report({'ERROR'}, message)
             return {'CANCELLED'}
 
