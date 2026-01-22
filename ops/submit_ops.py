@@ -190,7 +190,7 @@ class SHEEPIT_OT_submit_current(Operator):
                     
                     # Get preferences for authentication
                     from ..utils.compat import get_addon_prefs
-                    from ..utils.auth import load_auth_cookies
+                    # from ..utils.auth import load_auth_cookies  # Browser login commented out - using username/password only
                     
                     sheepit_prefs = get_addon_prefs()
                     if not sheepit_prefs:
@@ -199,22 +199,22 @@ class SHEEPIT_OT_submit_current(Operator):
                         self.report({'ERROR'}, self._error)
                         return {'CANCELLED'}
                     
-                    # Get authentication
-                    if sheepit_prefs.use_browser_login:
-                        self._auth_cookies = load_auth_cookies()
-                        if not self._auth_cookies:
-                            self._error = "No browser login session found. Please login via browser in preferences."
-                            self._cleanup(context, cancelled=True)
-                            self.report({'ERROR'}, self._error)
-                            return {'CANCELLED'}
-                    else:
-                        if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
-                            self._error = "Please configure SheepIt username and password in preferences."
-                            self._cleanup(context, cancelled=True)
-                            self.report({'ERROR'}, self._error)
-                            return {'CANCELLED'}
-                        self._username = sheepit_prefs.sheepit_username
-                        self._password = sheepit_prefs.sheepit_password
+                    # Get authentication - always use username/password (browser login commented out)
+                    # if sheepit_prefs.use_browser_login:
+                    #     self._auth_cookies = load_auth_cookies()
+                    #     if not self._auth_cookies:
+                    #         self._error = "No browser login session found. Please login via browser in preferences."
+                    #         self._cleanup(context, cancelled=True)
+                    #         self.report({'ERROR'}, self._error)
+                    #         return {'CANCELLED'}
+                    # else:
+                    if not sheepit_prefs.sheepit_username or not sheepit_prefs.sheepit_password:
+                        self._error = "Please configure SheepIt username and password in preferences."
+                        self._cleanup(context, cancelled=True)
+                        self.report({'ERROR'}, self._error)
+                        return {'CANCELLED'}
+                    self._username = sheepit_prefs.sheepit_username
+                    self._password = sheepit_prefs.sheepit_password
                     
                     self._phase = 'VALIDATING_FILE_SIZE'
                     return {'RUNNING_MODAL'}

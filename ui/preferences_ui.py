@@ -60,25 +60,25 @@ class SHEEPIT_OT_test_connection(Operator):
         # Import test function
         from ..utils.auth import test_connection
         
-        # Test connection based on authentication method
-        if prefs.use_browser_login:
-            # Test with browser login cookies
-            success, message, user_info = test_connection(use_browser_login=True)
-        else:
-            # Test with username/password
-            if not prefs.sheepit_username:
-                self.report({'ERROR'}, "Username is required")
-                return {'CANCELLED'}
-            
-            if not prefs.sheepit_password:
-                self.report({'ERROR'}, "Password is required")
-                return {'CANCELLED'}
-            
-            success, message, user_info = test_connection(
-                use_browser_login=False,
-                username=prefs.sheepit_username,
-                password=prefs.sheepit_password
-            )
+        # Test connection - always use username/password (browser login commented out)
+        # if prefs.use_browser_login:
+        #     # Test with browser login cookies
+        #     success, message, user_info = test_connection(use_browser_login=True)
+        # else:
+        # Test with username/password
+        if not prefs.sheepit_username:
+            self.report({'ERROR'}, "Username is required")
+            return {'CANCELLED'}
+        
+        if not prefs.sheepit_password:
+            self.report({'ERROR'}, "Password is required")
+            return {'CANCELLED'}
+        
+        success, message, user_info = test_connection(
+            use_browser_login=False,
+            username=prefs.sheepit_username,
+            password=prefs.sheepit_password
+        )
         
         # Report results
         if success:
@@ -135,59 +135,61 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         layout = self.layout
         
         # Update auth status if using browser login
-        if self.use_browser_login:
-            # Use direct import to avoid circular import issues
-            from ..utils.auth import load_auth_cookies
-            cookies = load_auth_cookies()
-            if cookies:
-                if self.auth_status == "Not logged in":
-                    self.auth_status = "Logged in (Browser)"
-            else:
-                if self.auth_status != "Not logged in":
-                    self.auth_status = "Not logged in"
+        # Browser login commented out - using username/password only
+        # if self.use_browser_login:
+        #     # Use direct import to avoid circular import issues
+        #     from ..utils.auth import load_auth_cookies
+        #     cookies = load_auth_cookies()
+        #     if cookies:
+        #         if self.auth_status == "Not logged in":
+        #             self.auth_status = "Logged in (Browser)"
+        #     else:
+        #         if self.auth_status != "Not logged in":
+        #             self.auth_status = "Not logged in"
         
         # Main authentication box
         box = layout.box()
         box.label(text="SheepIt Authentication", icon='USER')
         
-        # Browser login toggle
-        row = box.row()
-        row.prop(self, "use_browser_login")
+        # Browser login toggle - commented out
+        # row = box.row()
+        # row.prop(self, "use_browser_login")
         
-        if self.use_browser_login:
-            # Browser login mode
-            row = box.row()
-            row.label(text=f"Status: {self.auth_status}")
-            
-            if self.auth_status == "Not logged in" or "Please login" in self.auth_status:
-                row = box.row()
-                row.scale_y = 1.2
-                row.operator("sheepit.browser_login", text="Open Browser for Login", icon='WORLD')
-                
-                # Instructions
-                box.label(text="After logging in:", icon='INFO')
-                box.label(text="1. Open browser DevTools (F12)")
-                box.label(text="2. Go to Application/Storage → Cookies")
-                box.label(text="3. Find 'session' or 'PHPSESSID' cookie")
-                box.label(text="4. Copy its value and paste below:")
-                
-                # Token entry
-                row = box.row()
-                row.prop(self, "session_token")
-                row = box.row()
-                row.scale_y = 1.2
-                row.operator("sheepit.verify_login", text="Save Session Token", icon='CHECKMARK')
-            else:
-                row = box.row()
-                row.scale_y = 1.2
-                row.operator("sheepit.logout", text="Logout", icon='QUIT')
-        else:
-            # Username/Password mode
-            row = box.row()
-            row.prop(self, "sheepit_username")
-            
-            row = box.row()
-            row.prop(self, "sheepit_password")
+        # Always use username/password mode (browser login commented out)
+        # if self.use_browser_login:
+        #     # Browser login mode
+        #     row = box.row()
+        #     row.label(text=f"Status: {self.auth_status}")
+        #     
+        #     if self.auth_status == "Not logged in" or "Please login" in self.auth_status:
+        #         row = box.row()
+        #         row.scale_y = 1.2
+        #         row.operator("sheepit.browser_login", text="Open Browser for Login", icon='WORLD')
+        #         
+        #         # Instructions
+        #         box.label(text="After logging in:", icon='INFO')
+        #         box.label(text="1. Open browser DevTools (F12)")
+        #         box.label(text="2. Go to Application/Storage → Cookies")
+        #         box.label(text="3. Find 'session' or 'PHPSESSID' cookie")
+        #         box.label(text="4. Copy its value and paste below:")
+        #         
+        #         # Token entry
+        #         row = box.row()
+        #         row.prop(self, "session_token")
+        #         row = box.row()
+        #         row.scale_y = 1.2
+        #         row.operator("sheepit.verify_login", text="Save Session Token", icon='CHECKMARK')
+        #     else:
+        #         row = box.row()
+        #         row.scale_y = 1.2
+        #         row.operator("sheepit.logout", text="Logout", icon='QUIT')
+        # else:
+        # Username/Password mode (always used now)
+        row = box.row()
+        row.prop(self, "sheepit_username")
+        
+        row = box.row()
+        row.prop(self, "sheepit_password")
         
         box.separator()
         
@@ -200,13 +202,13 @@ class SHEEPIT_AddonPreferences(AddonPreferences):
         
         # Info box
         box.label(text="About Authentication:", icon='QUESTION')
-        if self.use_browser_login:
-            box.label(text="Browser Login: More secure than storing passwords.")
-            box.label(text="Session tokens are stored encrypted on your system.")
-            box.label(text="To get session token: Browser DevTools → Cookies → Copy session value.")
-        else:
-            box.label(text="Username/Password: Traditional login method.")
-            box.label(text="For better security, consider using Browser Login instead.")
+        # if self.use_browser_login:
+        #     box.label(text="Browser Login: More secure than storing passwords.")
+        #     box.label(text="Session tokens are stored encrypted on your system.")
+        #     box.label(text="To get session token: Browser DevTools → Cookies → Copy session value.")
+        # else:
+        box.label(text="Username/Password: Traditional login method.")
+        # box.label(text="For better security, consider using Browser Login instead.")
 
 
 reg_list = [SHEEPIT_AddonPreferences]

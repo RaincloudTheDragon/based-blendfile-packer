@@ -13,7 +13,8 @@ import webbrowser
 
 import bpy
 from .. import config
-from ..utils.auth import get_auth_headers, load_auth_cookies
+from ..utils.auth import get_auth_headers
+# from ..utils.auth import load_auth_cookies  # Browser login commented out - using username/password only
 
 
 def submit_file_to_sheepit(
@@ -70,18 +71,19 @@ def submit_file_to_sheepit(
     session_opener = None
     
     # Get authentication headers
-    if auth_cookies:
-        print(f"[SheepIt API] Using browser login cookies")
-        print(f"[SheepIt API] Cookie keys: {list(auth_cookies.keys())}")
-        headers = get_auth_headers(auth_cookies)
-        # Add Referer header (some servers require this for CSRF protection)
-        headers['Referer'] = f"{config.SHEEPIT_CLIENT_BASE}/getstarted"
-        print(f"[SheepIt API] Request headers: {list(headers.keys())}")
-        # Don't print full cookie values for security, but show if they exist
-        if 'Cookie' in headers:
-            cookie_preview = headers['Cookie'][:100] + "..." if len(headers['Cookie']) > 100 else headers['Cookie']
-            print(f"[SheepIt API] Cookie header preview: {cookie_preview}")
-    elif username and password:
+    # Browser login commented out - always use username/password
+    # if auth_cookies:
+    #     print(f"[SheepIt API] Using browser login cookies")
+    #     print(f"[SheepIt API] Cookie keys: {list(auth_cookies.keys())}")
+    #     headers = get_auth_headers(auth_cookies)
+    #     # Add Referer header (some servers require this for CSRF protection)
+    #     headers['Referer'] = f"{config.SHEEPIT_CLIENT_BASE}/getstarted"
+    #     print(f"[SheepIt API] Request headers: {list(headers.keys())}")
+    #     # Don't print full cookie values for security, but show if they exist
+    #     if 'Cookie' in headers:
+    #         cookie_preview = headers['Cookie'][:100] + "..." if len(headers['Cookie']) > 100 else headers['Cookie']
+    #         print(f"[SheepIt API] Cookie header preview: {cookie_preview}")
+    if username and password:
         print(f"[SheepIt API] Using username/password authentication")
         # For username/password, we need to login via /user/authenticate endpoint
         # This matches the JavaScript login flow (login.js)
