@@ -158,22 +158,53 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
     return files_removed
 
 
-def _run_blender_script(script: str, blend_path: Path) -> tuple[str, str, int]:
-    """Run a Python script in a Blender subprocess."""
+def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tuple[str, str, int]:
+    """Run a Python script in a Blender subprocess.
+    
+    Args:
+        script: Python script to execute
+        blend_path: Path to blend file to process
+        timeout: Timeout in seconds (default 300 = 5 minutes)
+    
+    Returns:
+        Tuple of (stdout, stderr, returncode)
+    """
     import subprocess
     import time
     print(f"[SheepIt Pack] Running Blender script on: {blend_path.name}")
+    print(f"[SheepIt Pack]   Full path: {blend_path}")
+    print(f"[SheepIt Pack]   Timeout: {timeout}s")
     start_time = time.time()
-    result = subprocess.run([
-        "blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script
-    ], capture_output=True, text=True, check=False)
-    elapsed = time.time() - start_time
-    print(f"[SheepIt Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
-    if result.stdout:
-        print(f"[SheepIt Pack]   stdout: {result.stdout[:200]}...")  # First 200 chars
-    if result.stderr:
-        print(f"[SheepIt Pack]   stderr: {result.stderr[:200]}...")  # First 200 chars
-    return result.stdout, result.stderr, result.returncode
+    try:
+        result = subprocess.run([
+            "blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script
+        ], capture_output=True, text=True, check=False, timeout=timeout)
+        elapsed = time.time() - start_time
+        print(f"[SheepIt Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
+        if result.stdout:
+            stdout_lines = result.stdout.strip().split('\n')
+            print(f"[SheepIt Pack]   stdout ({len(stdout_lines)} lines):")
+            for line in stdout_lines[:10]:  # First 10 lines
+                print(f"[SheepIt Pack]     {line}")
+            if len(stdout_lines) > 10:
+                print(f"[SheepIt Pack]     ... ({len(stdout_lines) - 10} more lines)")
+        if result.stderr:
+            stderr_lines = result.stderr.strip().split('\n')
+            print(f"[SheepIt Pack]   stderr ({len(stderr_lines)} lines):")
+            for line in stderr_lines[:10]:  # First 10 lines
+                print(f"[SheepIt Pack]     {line}")
+            if len(stderr_lines) > 10:
+                print(f"[SheepIt Pack]     ... ({len(stderr_lines) - 10} more lines)")
+        return result.stdout, result.stderr, result.returncode
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start_time
+        print(f"[SheepIt Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s)")
+        print(f"[SheepIt Pack]   This may indicate the blend file has issues or is very large")
+        return "", f"Script timed out after {timeout} seconds", -1
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[SheepIt Pack]   ERROR: Script failed after {elapsed:.2f}s: {type(e).__name__}: {str(e)}")
+        return "", str(e), -1
 
 
 def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root: Path, target_path: Path, ensure_autopack: bool = True) -> list[Path]:
@@ -203,51 +234,106 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         f"copy_map = json.loads(r'''{copy_map_json}''')\n"
         f"common_root = Path(r'{str(common_root)}')\n"
         f"target_path = Path(r'{str(target_path)}')\n"
+        "blend_dir = Path(bpy.data.filepath).parent\n"
         "bpy.context.preferences.filepaths.use_relative_paths = True\n"
         "remapped = 0\n"
+        "unresolved = []\n"
+        "print(f'Remapping library paths in: {{bpy.path.basename(bpy.data.filepath)}}')\n"
+        "print(f'Found {{len(bpy.data.libraries)}} libraries')\n"
         "for lib in bpy.data.libraries:\n"
         "    src = lib.filepath\n"
+        "    print(f'  Processing library: {{lib.name}}, current path: {{src}}')\n"
+        "    # Convert to absolute path\n"
         "    if src.startswith('//'):\n"
-        "        abs_src = (Path(bpy.data.filepath).parent / src[2:]).resolve()\n"
+        "        abs_src = (blend_dir / src[2:]).resolve()\n"
         "    else:\n"
         "        abs_src = Path(src).resolve()\n"
         "    key = str(abs_src)\n"
         "    new_abs = None\n"
+        "    # Check if already in target path\n"
         "    try:\n"
-        "        abs_src.relative_to(target_path)\n"
-        "        new_abs = abs_src\n"
+        "        if abs_src.relative_to(target_path):\n"
+        "            new_abs = abs_src\n"
+        "            print(f'    Already in target path: {{new_abs}}')\n"
         "    except Exception:\n"
-        "        new_abs = None\n"
-        "    if key in copy_map:\n"
+        "        pass\n"
+        "    # Look up in copy_map first (most reliable)\n"
+        "    if new_abs is None and key in copy_map:\n"
         "        new_abs = Path(copy_map[key])\n"
-        "    elif new_abs is None:\n"
+        "        print(f'    Found in copy_map: {{new_abs}}')\n"
+        "    # Try relative to common_root\n"
+        "    if new_abs is None:\n"
         "        try:\n"
         "            rel_to_root = abs_src.relative_to(common_root)\n"
         "            new_abs = (target_path / rel_to_root).resolve()\n"
+        "            print(f'    Computed from common_root: {{new_abs}}')\n"
         "        except Exception:\n"
         "            pass\n"
-        "    if new_abs is None:\n"
-        "        continue\n"
-        "    lib.filepath = str(new_abs)\n"
-        "    try:\n"
-        "        lib.filepath = bpy.path.relpath(str(new_abs))\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    remapped += 1\n"
+        "    # If we found a new path, verify it exists and remap\n"
+        "    if new_abs is not None:\n"
+        "        if new_abs.exists():\n"
+        "            # Set absolute path first\n"
+        "            lib.filepath = str(new_abs)\n"
+        "            # Then convert to relative\n"
+        "            try:\n"
+        "                rel_path = bpy.path.relpath(str(new_abs))\n"
+        "                lib.filepath = rel_path\n"
+        "                print(f'    Remapped to relative: {{rel_path}}')\n"
+        "                remapped += 1\n"
+        "            except Exception as e:\n"
+        "                print(f'    WARNING: Could not make relative: {{e}}, keeping absolute')\n"
+        "                remapped += 1\n"
+        "        else:\n"
+        "            print(f'    WARNING: Target file does not exist: {{new_abs}}')\n"
+        "            unresolved.append(str(new_abs))\n"
+        "    else:\n"
+        "        print(f'    WARNING: Could not determine new path for: {{abs_src}}')\n"
+        "        unresolved.append(str(abs_src))\n"
+        "print(f'Remapped {{remapped}} libraries, {{len(unresolved)}} unresolved')\n"
+        "if unresolved:\n"
+        "    print(f'Unresolved paths: {{unresolved}}')\n"
+        "# Save after remapping\n"
         "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)))\n"
+        "# Make all paths relative\n"
         "try:\n"
-        "    bpy.ops.file.make_paths_relative(basedir=str(Path(bpy.data.filepath).parent))\n"
-        "except Exception:\n"
-        "    pass\n"
+        "    bpy.ops.file.make_paths_relative(basedir=str(blend_dir))\n"
+        "    print('Made all paths relative')\n"
+        "except Exception as e:\n"
+        "    print(f'Warning: make_paths_relative failed: {{e}}')\n"
         f"{autopack_block}"
+        "# Final save\n"
         "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)))\n"
+        "print('Remapping complete')\n"
     )
     
     stdout, stderr, returncode = _run_blender_script(remap_script, blend_path)
     unresolved = []
     
+    # Parse unresolved paths from output
+    if stdout:
+        import re
+        for line in stdout.splitlines():
+            if 'Unresolved paths:' in line or 'WARNING: Target file does not exist:' in line or 'WARNING: Could not determine new path for:' in line:
+                # Try to extract path from the line
+                match = re.search(r':\s*(.+)$', line)
+                if match:
+                    unresolved_path = match.group(1).strip()
+                    try:
+                        unresolved.append(Path(unresolved_path))
+                    except Exception:
+                        pass
+    
     if returncode != 0:
-        return unresolved
+        print(f"[SheepIt Pack] WARNING: remap_library_paths returned non-zero exit code: {returncode}")
+        if stderr:
+            print(f"[SheepIt Pack]   Error details: {stderr[:500]}")
+    
+    if unresolved:
+        print(f"[SheepIt Pack] WARNING: {len(unresolved)} library paths could not be remapped")
+        for up in unresolved[:5]:  # Show first 5
+            print(f"[SheepIt Pack]   - {up}")
+        if len(unresolved) > 5:
+            print(f"[SheepIt Pack]   ... and {len(unresolved) - 5} more")
     
     return unresolved
 
@@ -285,18 +371,60 @@ def pack_all_in_blend(blend_path: Path) -> list[Path]:
     return missing
 
 
-def pack_linked_in_blend(blend_path: Path) -> None:
-    """Open a blend and run Pack Linked (pack libraries), then save with autopack on."""
+def pack_linked_in_blend(blend_path: Path) -> tuple[list[Path], list[Path]]:
+    """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
+    
+    Returns:
+        Tuple of (missing_files: list[Path], oversized_files: list[Path])
+        - missing_files: Files that don't exist and couldn't be packed
+        - oversized_files: Files over 2GB that Blender can't pack
+    """
+    # 2GB limit (2 * 1024 * 1024 * 1024 bytes)
+    MAX_PACKABLE_SIZE = 2 * 1024 * 1024 * 1024
+    
     script = (
         "import bpy\n"
+        "from pathlib import Path\n"
+        "print('=== Pack Linked Operation ===')\n"
+        "print(f'Processing: {bpy.path.basename(bpy.data.filepath)}')\n"
+        "print(f'Libraries found: {len(bpy.data.libraries)}')\n"
+        "missing_files = []\n"
+        "oversized_files = []\n"
+        "for lib in bpy.data.libraries:\n"
+        "    lib_path = Path(lib.filepath)\n"
+        "    if lib.filepath.startswith('//'):\n"
+        "        lib_path = Path(bpy.data.filepath).parent / lib.filepath[2:]\n"
+        "    if not lib_path.exists():\n"
+        "        missing_files.append(str(lib_path))\n"
+        "        print(f'  Library (MISSING): {lib.name}, path: {lib.filepath}')\n"
+        "    else:\n"
+        "        file_size = lib_path.stat().st_size\n"
+        "        file_size_gb = file_size / (1024 * 1024 * 1024)\n"
+        "        if file_size > " + str(MAX_PACKABLE_SIZE) + ":\n"
+        "            oversized_files.append(str(lib_path))\n"
+        "            print(f'  Library (OVER 2GB, cannot pack): {lib.name}, path: {lib.filepath}, size: {file_size_gb:.2f} GB')\n"
+        "        else:\n"
+        "            print(f'  Library (found, {file_size_gb:.2f} GB): {lib.name}, path: {lib.filepath}')\n"
+        "if missing_files:\n"
+        "    print(f'WARNING: {len(missing_files)} linked libraries not found and cannot be packed')\n"
+        "if oversized_files:\n"
+        "    print(f'WARNING: {len(oversized_files)} linked libraries are over 2GB and cannot be packed by Blender')\n"
         "try:\n"
         "    bpy.ops.file.make_paths_relative()\n"
-        "except Exception:\n"
-        "    pass\n"
+        "    print('Made paths relative')\n"
+        "except Exception as e:\n"
+        "    print(f'Warning: make_paths_relative failed: {e}')\n"
+        "packed_count = 0\n"
+        "pack_errors = []\n"
         "try:\n"
+        "    print('Starting pack_libraries()...')\n"
         "    bpy.ops.file.pack_libraries()\n"
-        "except Exception:\n"
-        "    pass\n"
+        "    packed_count = 1\n"
+        "    print('pack_libraries() completed successfully')\n"
+        "except Exception as e:\n"
+        "    error_msg = f'{type(e).__name__}: {str(e)}'\n"
+        "    pack_errors.append(error_msg)\n"
+        "    print(f'Warning: pack_libraries() failed: {error_msg}')\n"
         "try:\n"
         "    fp = bpy.context.preferences.filepaths\n"
         "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
@@ -307,10 +435,111 @@ def pack_linked_in_blend(blend_path: Path) -> None:
         "                pass\n"
         "except Exception:\n"
         "    pass\n"
+        "print('Saving file...')\n"
         "bpy.ops.wm.save_mainfile()\n"
+        "print(f'=== Pack Linked Complete (packed: {packed_count}, missing: {len(missing_files)}, oversized: {len(oversized_files)}) ===')\n"
+        "for mf in missing_files:\n"
+        "    print(f'MISSING_FILE: {mf}')\n"
+        "for of in oversized_files:\n"
+        "    print(f'OVERSIZED_FILE: {of}')\n"
+        "for err in pack_errors:\n"
+        "    print(f'PACK_ERROR: {err}')\n"
     )
     
-    _run_blender_script(script, blend_path)
+    stdout, stderr, returncode = _run_blender_script(script, blend_path, timeout=600)  # 10 minute timeout for pack_linked
+    
+    # Parse missing and oversized files from output
+    missing_files = []
+    oversized_files = []
+    if stdout:
+        for line in stdout.splitlines():
+            if line.startswith('MISSING_FILE:'):
+                missing_path = line.replace('MISSING_FILE:', '').strip()
+                try:
+                    missing_files.append(Path(missing_path))
+                except Exception:
+                    pass
+            elif line.startswith('OVERSIZED_FILE:'):
+                oversized_path = line.replace('OVERSIZED_FILE:', '').strip()
+                try:
+                    oversized_files.append(Path(oversized_path))
+                except Exception:
+                    pass
+    
+    # Also check for Blender's standard missing file warnings
+    combined_output = (stdout or "") + "\n" + (stderr or "")
+    import re
+    # Pattern: "Warning, files not found: //path/to/file.blend"
+    missing_patterns = [
+        r"Warning, files not found:\s*(.+)",
+        r"Unable to pack file, source path '([^']+)' not found",
+        r"File not found:\s*(.+)",
+    ]
+    for pattern in missing_patterns:
+        for match in re.finditer(pattern, combined_output, re.IGNORECASE):
+            missing_path_str = match.group(1).strip()
+            # Handle relative paths (//path)
+            if missing_path_str.startswith('//'):
+                try:
+                    # Convert relative path to absolute
+                    blend_dir = blend_path.parent
+                    rel_path = missing_path_str[2:]
+                    missing_path = (blend_dir / rel_path).resolve()
+                except Exception:
+                    missing_path = Path(missing_path_str)
+            else:
+                missing_path = Path(missing_path_str)
+            if missing_path not in missing_files:
+                missing_files.append(missing_path)
+    
+    # Check for 2GB size limit errors in Blender output
+    size_error_patterns = [
+        r"file.*too large.*2.*GB",
+        r"exceeds.*2.*GB",
+        r"over.*2.*GB",
+        r"larger than.*2.*GB",
+    ]
+    for pattern in size_error_patterns:
+        for match in re.finditer(pattern, combined_output, re.IGNORECASE):
+            # Try to extract file path from context
+            context_start = max(0, match.start() - 200)
+            context_end = min(len(combined_output), match.end() + 200)
+            context = combined_output[context_start:context_end]
+            # Look for file paths in the context
+            path_matches = re.finditer(r"['\"]([^'\"]+\.blend)['\"]", context, re.IGNORECASE)
+            for path_match in path_matches:
+                path_str = path_match.group(1)
+                try:
+                    oversized_path = Path(path_str)
+                    if oversized_path.exists() and oversized_path not in oversized_files:
+                        oversized_files.append(oversized_path)
+                except Exception:
+                    pass
+    
+    if missing_files:
+        print(f"[SheepIt Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
+        for mf in missing_files[:5]:  # Show first 5
+            print(f"[SheepIt Pack]     - {mf.name if mf.name else mf}")
+        if len(missing_files) > 5:
+            print(f"[SheepIt Pack]     ... and {len(missing_files) - 5} more")
+        print(f"[SheepIt Pack]   Note: Missing linked files cannot be packed. The blend file will still be saved without these libraries.")
+    
+    if oversized_files:
+        print(f"[SheepIt Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over 2GB):")
+        for of in oversized_files[:5]:  # Show first 5
+            file_size_gb = of.stat().st_size / (1024 * 1024 * 1024) if of.exists() else 0
+            print(f"[SheepIt Pack]     - {of.name if of.name else of} ({file_size_gb:.2f} GB)")
+        if len(oversized_files) > 5:
+            print(f"[SheepIt Pack]     ... and {len(oversized_files) - 5} more")
+        print(f"[SheepIt Pack]   Note: Blender cannot pack linked files over 2GB. These libraries will remain as external references.")
+        print(f"[SheepIt Pack]   To fix: Reduce the size of these files or split them into smaller files.")
+    
+    if returncode != 0:
+        print(f"[SheepIt Pack] WARNING: pack_linked_in_blend returned non-zero exit code: {returncode}")
+        if stderr:
+            print(f"[SheepIt Pack]   Error details: {stderr[:500]}")
+    
+    return missing_files, oversized_files
 
 
 def enable_nla_in_blend(blend_path: Path, autopack_on_save: bool = True) -> None:
@@ -374,7 +603,8 @@ class IncrementalPacker:
     
     def __init__(self, workflow: str, target_path: Optional[Path], enable_nla: bool, 
                  progress_callback=None, cancel_check=None,
-                 frame_start=None, frame_end=None, frame_step=None):
+                 frame_start=None, frame_end=None, frame_step=None,
+                 temp_blend_path: Optional[Path] = None):
         self.workflow = workflow
         self.target_path = target_path
         self.enable_nla = enable_nla
@@ -383,6 +613,7 @@ class IncrementalPacker:
         self.frame_start = frame_start  # For cache truncation
         self.frame_end = frame_end
         self.frame_step = frame_step
+        self.temp_blend_path = temp_blend_path  # Temp file used as source (should be copied directly to root)
         
         # State tracking
         self.phase = 'INIT'
@@ -415,6 +646,9 @@ class IncrementalPacker:
         
         # Cache truncation state
         self.cache_truncate_index = 0
+        
+        # Pack linked issues tracking
+        self.oversized_files_all = []  # Collect all oversized files from pack_linked operations
         
         # Results
         self.file_path = None
@@ -465,6 +699,11 @@ class IncrementalPacker:
                 for asset_usages in self.asset_usages.values()
                 for asset_usage in asset_usages
             )
+            # Exclude temp file from common root calculation (it's just a source, not part of the project)
+            if self.temp_blend_path:
+                temp_path_resolved = self.temp_blend_path.resolve()
+                self.all_filepaths = [p for p in self.all_filepaths if p.resolve() != temp_path_resolved]
+                print(f"[SheepIt Pack]   Excluded temp file from common root calculation")
             print(f"[SheepIt Pack] Collected {len(self.all_filepaths)} total file paths")
             self.phase = 'FIND_COMMON_ROOT'
             return ('FIND_COMMON_ROOT', False)
@@ -499,15 +738,26 @@ class IncrementalPacker:
                 self.progress_callback(15.0, "Copying top-level blend file...")
             
             current_blend_abspath = self.top_level_blend_abs
-            try:
-                current_relpath = current_blend_abspath.relative_to(self.common_root)
-                print(f"[SheepIt Pack]   Relative path: {current_relpath}")
-            except ValueError:
-                current_relpath = compute_target_relpath(current_blend_abspath, self.common_root)
-                print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
+            
+            # If this is a temp file, copy it directly to target root with just its filename
+            # This avoids the DRIVE_C path structure issue
+            is_temp_file = (self.temp_blend_path and 
+                          current_blend_abspath.resolve() == self.temp_blend_path.resolve())
+            
+            if is_temp_file:
+                # Copy temp file directly to target root
+                target_path_file = self.target_path / current_blend_abspath.name
+                print(f"[SheepIt Pack]   Temp file detected, copying directly to target root: {target_path_file.name}")
+            else:
+                try:
+                    current_relpath = current_blend_abspath.relative_to(self.common_root)
+                    print(f"[SheepIt Pack]   Relative path: {current_relpath}")
+                except ValueError:
+                    current_relpath = compute_target_relpath(current_blend_abspath, self.common_root)
+                    print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
+                target_path_file = self.target_path / current_relpath
             
             if current_blend_abspath not in self.copied_paths:
-                target_path_file = self.target_path / current_relpath
                 print(f"[SheepIt Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
                 try:
                     target_path_file.parent.mkdir(parents=True, exist_ok=True)
@@ -517,11 +767,12 @@ class IncrementalPacker:
                         self.copy_map[str(current_blend_abspath.resolve())] = str(target_path_file.resolve())
                     self.top_level_target_blend = target_path_file.resolve()
                     print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
-                    # Copy caches
-                    print(f"[SheepIt Pack]   Copying blend caches...")
-                    copied_cache_dirs = copy_blend_caches(current_blend_abspath, target_path_file, self.missing_on_copy)
-                    self.cache_dirs.extend(copied_cache_dirs)
-                    print(f"[SheepIt Pack]   Copied {len(copied_cache_dirs)} cache directories")
+                    # Copy caches - only if not a temp file (temp files don't have caches)
+                    if not is_temp_file:
+                        print(f"[SheepIt Pack]   Copying blend caches...")
+                        copied_cache_dirs = copy_blend_caches(current_blend_abspath, target_path_file, self.missing_on_copy)
+                        self.cache_dirs.extend(copied_cache_dirs)
+                        print(f"[SheepIt Pack]   Copied {len(copied_cache_dirs)} cache directories")
                 except Exception as e:
                     print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
                     self.missing_on_copy.append(current_blend_abspath)
@@ -623,14 +874,27 @@ class IncrementalPacker:
                 self.progress_callback(45.0, "Finding blend dependencies...")
             self.blend_deps = au.find_blend_asset_usage()
             self.to_remap = []
-            for abs_path in [self.top_level_blend_abs] + [au.library_abspath(lib) for lib in self.blend_deps.keys()]:
+            
+            # Add top-level blend (use the copied target path, not the original)
+            if self.top_level_target_blend and self.top_level_target_blend.exists():
+                self.to_remap.append(self.top_level_target_blend)
+                print(f"[SheepIt Pack]   Added top-level blend to remap list: {self.top_level_target_blend.name}")
+            
+            # Add all dependent blend files
+            for lib in self.blend_deps.keys():
+                abs_path = au.library_abspath(lib)
                 if abs_path.suffix.lower() != ".blend":
                     continue
                 try:
                     rel = abs_path.relative_to(self.common_root)
                 except ValueError:
                     rel = compute_target_relpath(abs_path, self.common_root)
-                self.to_remap.append(self.target_path / rel)
+                target_blend = self.target_path / rel
+                if target_blend.exists():
+                    self.to_remap.append(target_blend)
+                    print(f"[SheepIt Pack]   Added dependent blend to remap list: {target_blend.name}")
+                else:
+                    print(f"[SheepIt Pack]   WARNING: Dependent blend not found at target: {target_blend}")
             
             print(f"[SheepIt Pack] Found {len(self.to_remap)} blend files to process")
             self.nla_index = 0
@@ -674,13 +938,19 @@ class IncrementalPacker:
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Remapping paths... ({self.remap_index + 1}/{len(self.to_remap)})")
                     print(f"[SheepIt Pack]   [{self.remap_index + 1}/{len(self.to_remap)}] Remapping paths in: {blend_to_fix.name}")
-                    remap_library_paths(
+                    unresolved = remap_library_paths(
                         blend_to_fix,
                         self.copy_map,
                         self.common_root,
                         self.target_path,
                         ensure_autopack=self.autopack_on_save,
                     )
+                    if unresolved:
+                        print(f"[SheepIt Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
+                        for up in unresolved[:3]:  # Show first 3
+                            print(f"[SheepIt Pack]       - {up}")
+                        if len(unresolved) > 3:
+                            print(f"[SheepIt Pack]       ... and {len(unresolved) - 3} more")
                 self.remap_index += 1
                 return ('REMAP_PATHS', False)
             else:
@@ -734,7 +1004,28 @@ class IncrementalPacker:
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Packing linked... ({self.pack_linked_index + 1}/{len(self.to_remap)})")
                     print(f"[SheepIt Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    pack_linked_in_blend(blend_to_fix)
+                    print(f"[SheepIt Pack]   Starting pack_linked operation (this may take a while for large files)...")
+                    try:
+                        missing_files, oversized_files = pack_linked_in_blend(blend_to_fix)
+                        # Track oversized files for user reporting
+                        if oversized_files:
+                            self.oversized_files_all.extend(oversized_files)
+                        issues = []
+                        if missing_files:
+                            issues.append(f"{len(missing_files)} missing")
+                        if oversized_files:
+                            issues.append(f"{len(oversized_files)} over 2GB")
+                        if issues:
+                            print(f"[SheepIt Pack]   Completed pack_linked for: {blend_to_fix.name} (with {', '.join(issues)} linked files that couldn't be packed)")
+                        else:
+                            print(f"[SheepIt Pack]   Completed pack_linked for: {blend_to_fix.name}")
+                    except Exception as e:
+                        print(f"[SheepIt Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        # Continue with next file rather than failing completely
+                else:
+                    print(f"[SheepIt Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
                 self.pack_linked_index += 1
                 return ('PACK_LINKED', False)
             else:
@@ -1016,7 +1307,14 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     if progress_callback:
                         progress_callback(progress_pct, f"Packing linked... ({i}/{len(to_remap)})")
                     print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    pack_linked_in_blend(blend_to_fix)
+                    missing_files, oversized_files = pack_linked_in_blend(blend_to_fix)
+                    issues = []
+                    if missing_files:
+                        issues.append(f"{len(missing_files)} missing")
+                    if oversized_files:
+                        issues.append(f"{len(oversized_files)} over 2GB")
+                    if issues:
+                        print(f"[SheepIt Pack]     Note: {', '.join(issues)} linked files could not be packed")
             print(f"[SheepIt Pack] Finished packing linked libraries")
     
     print(f"[SheepIt Pack] Pack process completed successfully!")
@@ -1221,7 +1519,8 @@ class SHEEPIT_OT_pack_zip(Operator):
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
                         frame_end=self._frame_end,
-                        frame_step=self._frame_step
+                        frame_step=self._frame_step,
+                        temp_blend_path=self._temp_blend_path
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -1240,6 +1539,23 @@ class SHEEPIT_OT_pack_zip(Operator):
                             print(f"[SheepIt Pack] DEBUG: Incremental packing completed")
                             print(f"[SheepIt Pack] Packed to: {self._target_path}")
                             context.scene.sheepit_submit.pack_output_path = str(self._target_path)
+                            
+                            # Check for oversized files that couldn't be packed
+                            if self._packer.oversized_files_all:
+                                oversized_list = "\n".join(f"  - {f.name if f.name else f} ({f.stat().st_size / (1024**3):.2f} GB)" 
+                                                          for f in self._packer.oversized_files_all[:10])
+                                if len(self._packer.oversized_files_all) > 10:
+                                    oversized_list += f"\n  ... and {len(self._packer.oversized_files_all) - 10} more"
+                                warning_msg = (
+                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed:\n"
+                                    f"{oversized_list}\n\n"
+                                    "Blender cannot pack linked files over 2GB. These files will remain as external references.\n"
+                                    "To fix: Reduce the size of these files or split them into smaller files."
+                                )
+                                print(f"[SheepIt Pack] {warning_msg}")
+                                # Report as warning (non-blocking)
+                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed")
+                            
                             self._phase = 'APPLYING_FRAME_RANGE_TO_PACKED'
                             print(f"[SheepIt Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
                         else:
@@ -1761,7 +2077,8 @@ class SHEEPIT_OT_pack_blend(Operator):
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
                         frame_end=self._frame_end,
-                        frame_step=self._frame_step
+                        frame_step=self._frame_step,
+                        temp_blend_path=self._temp_blend_path
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -1780,6 +2097,22 @@ class SHEEPIT_OT_pack_blend(Operator):
                             print(f"[SheepIt Pack] DEBUG: Incremental packing completed")
                             print(f"[SheepIt Pack] Packed to: {self._target_path}")
                             context.scene.sheepit_submit.pack_output_path = str(self._target_path)
+                            
+                            # Check for oversized files that couldn't be packed
+                            if self._packer.oversized_files_all:
+                                oversized_list = "\n".join(f"  - {f.name if f.name else f} ({f.stat().st_size / (1024**3):.2f} GB)" 
+                                                          for f in self._packer.oversized_files_all[:10])
+                                if len(self._packer.oversized_files_all) > 10:
+                                    oversized_list += f"\n  ... and {len(self._packer.oversized_files_all) - 10} more"
+                                warning_msg = (
+                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed:\n"
+                                    f"{oversized_list}\n\n"
+                                    "Blender cannot pack linked files over 2GB. These files will remain as external references.\n"
+                                    "To fix: Reduce the size of these files or split them into smaller files."
+                                )
+                                print(f"[SheepIt Pack] {warning_msg}")
+                                # Report as warning (non-blocking)
+                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed")
                             
                             if not self._blend_path or not self._blend_path.exists():
                                 self._error = "Could not find target blend file for submission."
