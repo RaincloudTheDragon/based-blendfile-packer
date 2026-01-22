@@ -1,3 +1,15 @@
+## [v0.0.2] - 2026-01-22
+
+### Fixed
+- Fixed Blender extension policy violations related to `batter.asset_usage` module import
+- Removed `sys.path` manipulation to comply with Blender extension policies
+- Changed from top-level module import to submodule import (registered as `ops._asset_usage`)
+- Fixed `dataclasses` `__module__` resolution issue when loading modules via `importlib`
+
+### Internal
+- Refactored `batter.asset_usage` import to use `importlib` without violating extension policies
+- Module now properly registered in `sys.modules` as a submodule before execution
+
 ## [v0.0.1] - 2026-01-21
 
 ### Features
