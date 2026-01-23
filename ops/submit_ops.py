@@ -127,36 +127,10 @@ class SHEEPIT_OT_submit_current(Operator):
         
         # Generate filename
         blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
-        blend_name = Path(blend_name).stem if blend_name else "untitled"
-        output_file = Path(output_dir) / f"{blend_name}.blend"
-        
-        # Start the operation
-        return self.execute(context)
-    
-    def execute(self, context):
-        """Execute the packing operation."""
-        submit_settings = context.scene.sheepit_submit
-        
-        # Check if already packing
-        if submit_settings.is_submitting:
-            self.report({'WARNING'}, "A packing operation is already in progress.")
-            return {'CANCELLED'}
-        
-        # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
-        if not output_dir:
-            from ..utils.compat import get_addon_prefs
-            prefs = get_addon_prefs()
-            if prefs and prefs.default_output_path:
-                output_dir = prefs.default_output_path
-        
-        if not output_dir:
-            self.report({'ERROR'}, "Please specify an output path in the panel below.")
-            return {'CANCELLED'}
-        
-        # Generate filename
-        blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
-        blend_name = Path(blend_name).stem if blend_name else "untitled"
+        if blend_name:
+            blend_name = Path(blend_name).stem
+        else:
+            blend_name = "untitled"
         output_file = Path(output_dir) / f"{blend_name}.blend"
         
         # Initialize progress properties
@@ -184,6 +158,10 @@ class SHEEPIT_OT_submit_current(Operator):
         # Start modal operation
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        """Legacy execute method - redirects to invoke for modal operation."""
+        return self.invoke(context, None)
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
@@ -349,8 +327,10 @@ class SHEEPIT_OT_submit_current(Operator):
                 area.tag_redraw()
     
     def execute(self, context):
-        """Legacy execute method - redirects to invoke for modal operation."""
-        return self.invoke(context, None)
+        """Execute method - starts the modal operation."""
+        # This is called by invoke, so we don't redirect back to avoid recursion
+        # The actual implementation is in the invoke method above
+        pass
 
 
 def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None) -> None:
