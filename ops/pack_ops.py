@@ -1482,33 +1482,12 @@ class SHEEPIT_OT_pack_zip(Operator):
             self.report({'ERROR'}, "Please specify an output path in the panel below.")
             return {'CANCELLED'}
         
-        # Start the operation
-        return self.execute(context)
-    
-    def execute(self, context):
-        """Execute the packing operation."""
-        submit_settings = context.scene.sheepit_submit
-        
-        # Check if already packing
-        if submit_settings.is_submitting:
-            self.report({'WARNING'}, "A packing operation is already in progress.")
-            return {'CANCELLED'}
-        
-        # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
-        if not output_dir:
-            from ..utils.compat import get_addon_prefs
-            prefs = get_addon_prefs()
-            if prefs and prefs.default_output_path:
-                output_dir = prefs.default_output_path
-        
-        if not output_dir:
-            self.report({'ERROR'}, "Please specify an output path in the panel below.")
-            return {'CANCELLED'}
-        
         # Generate filename (will be set after ZIP creation with pack indicator)
         blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
-        blend_name = Path(blend_name).stem if blend_name else "untitled"
+        if blend_name:
+            blend_name = Path(blend_name).stem
+        else:
+            blend_name = "untitled"
         # Output path will be set after ZIP creation with pack indicator
         self._output_dir = Path(output_dir)
         
@@ -1544,6 +1523,10 @@ class SHEEPIT_OT_pack_zip(Operator):
         # Start modal operation
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        """Legacy execute method - redirects to invoke for modal operation."""
+        return self.invoke(context, None)
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
@@ -2063,33 +2046,12 @@ class SHEEPIT_OT_pack_blend(Operator):
             self.report({'ERROR'}, "Please specify an output path in the panel below.")
             return {'CANCELLED'}
         
-        # Start the operation
-        return self.execute(context)
-    
-    def execute(self, context):
-        """Execute the packing operation."""
-        submit_settings = context.scene.sheepit_submit
-        
-        # Check if already packing
-        if submit_settings.is_submitting:
-            self.report({'WARNING'}, "A packing operation is already in progress.")
-            return {'CANCELLED'}
-        
-        # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
-        if not output_dir:
-            from ..utils.compat import get_addon_prefs
-            prefs = get_addon_prefs()
-            if prefs and prefs.default_output_path:
-                output_dir = prefs.default_output_path
-        
-        if not output_dir:
-            self.report({'ERROR'}, "Please specify an output path in the panel below.")
-            return {'CANCELLED'}
-        
         # Generate filename
         blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
-        blend_name = Path(blend_name).stem if blend_name else "untitled"
+        if blend_name:
+            blend_name = Path(blend_name).stem
+        else:
+            blend_name = "untitled"
         output_file = Path(output_dir) / f"{blend_name}_packed.blend"
         
         # Initialize progress properties
@@ -2124,6 +2086,10 @@ class SHEEPIT_OT_pack_blend(Operator):
         # Start modal operation
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        """Legacy execute method - redirects to invoke for modal operation."""
+        return self.invoke(context, None)
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
