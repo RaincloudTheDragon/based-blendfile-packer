@@ -2052,7 +2052,7 @@ class SHEEPIT_OT_pack_blend(Operator):
             blend_name = Path(blend_name).stem
         else:
             blend_name = "untitled"
-        output_file = Path(output_dir) / f"{blend_name}_packed.blend"
+        output_file = Path(output_dir) / f"{blend_name}.blend"
         
         # Initialize progress properties
         submit_settings.is_submitting = True
