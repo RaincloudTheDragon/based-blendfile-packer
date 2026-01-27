@@ -115,13 +115,72 @@ def compute_target_relpath(abs_path: Path, base_root: Path) -> Path:
         return Path(label) / Path(rel_after_anchor)
 
 
-def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list) -> list[Path]:
+def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list, 
+                      frame_start: Optional[int] = None, frame_end: Optional[int] = None, 
+                      frame_step: Optional[int] = None) -> list[Path]:
     """Copy common cache folders for a given .blend next to its target copy.
     
+    If frame range parameters are provided, only copies cache files within that range.
+    Otherwise, copies all cache files.
+    
+    Args:
+        src_blend: Source blend file path
+        dst_blend: Destination blend file path
+        missing_on_copy: List to append missing files to
+        frame_start: Optional start frame for filtering cache files
+        frame_end: Optional end frame for filtering cache files
+        frame_step: Optional frame step for filtering cache files
+    
     Returns:
-        List of copied cache directory paths (for truncation)
+        List of copied cache directory paths (for truncation, if needed)
     """
+    import re
     copied = []
+    filter_by_frame = frame_start is not None and frame_end is not None and frame_step is not None
+    valid_frames = None
+    
+    if filter_by_frame:
+        valid_frames = set(range(frame_start, frame_end + 1, frame_step))
+    
+    def should_copy_file(file_path: Path) -> bool:
+        """Check if a cache file should be copied based on frame range."""
+        if not filter_by_frame:
+            return True
+        
+        if not file_path.is_file():
+            return True  # Copy directories
+        
+        # Try to extract frame number from filename (same logic as truncate_caches_to_frame_range)
+        frame_num = None
+        # Pattern 1: frame_####.ext or cache_####.ext
+        match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', file_path.stem, re.IGNORECASE)
+        if match:
+            frame_num = int(match.group(1))
+        else:
+            # Pattern 2: Just numbers at end of filename
+            match = re.search(r'(\d+)$', file_path.stem)
+            if match:
+                frame_num = int(match.group(1))
+        
+        if frame_num is None:
+            # If we can't determine frame number, copy it (safer to include than exclude)
+            return True
+        
+        return frame_num in valid_frames
+    
+    def copy_tree_filtered(src: Path, dst: Path):
+        """Copy directory tree while filtering files based on frame range."""
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in src.iterdir():
+            src_item = src / item.name
+            dst_item = dst / item.name
+            
+            if src_item.is_dir():
+                copy_tree_filtered(src_item, dst_item)
+            elif src_item.is_file():
+                if should_copy_file(src_item):
+                    shutil.copy2(src_item, dst_item)
+    
     try:
         src_parent = src_blend.parent
         dst_parent = dst_blend.parent
@@ -143,21 +202,33 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list) -
         for src_dir, dst_dir in candidates:
             try:
                 if src_dir.exists() and src_dir.is_dir():
-                    dst_dir.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
-                        copied.append(dst_dir)
-                        continue
-                    except PermissionError as e:
-                        if os.name == "nt":
-                            import subprocess as _sub
-                            rc = _sub.run([
-                                "robocopy", str(src_dir), str(dst_dir), "/E", "/R:2", "/W:1"
-                            ], capture_output=True, text=True)
-                            if rc.returncode < 8:
-                                copied.append(dst_dir)
-                                continue
-                        raise e
+                    if filter_by_frame:
+                        # Filter during copy
+                        try:
+                            copy_tree_filtered(src_dir, dst_dir)
+                            copied.append(dst_dir)
+                            continue
+                        except Exception as e:
+                            print(f"[SheepIt Pack] WARNING: Error copying filtered cache {src_dir.name}: {e}")
+                            missing_on_copy.append(src_dir)
+                            continue
+                    else:
+                        # Copy all files (original behavior)
+                        dst_dir.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+                            copied.append(dst_dir)
+                            continue
+                        except PermissionError as e:
+                            if os.name == "nt":
+                                import subprocess as _sub
+                                rc = _sub.run([
+                                    "robocopy", str(src_dir), str(dst_dir), "/E", "/R:2", "/W:1"
+                                ], capture_output=True, text=True)
+                                if rc.returncode < 8:
+                                    copied.append(dst_dir)
+                                    continue
+                            raise e
             except Exception as e:
                 missing_on_copy.append(src_dir)
     except Exception:
@@ -714,7 +785,8 @@ class IncrementalPacker:
     def __init__(self, workflow: str, target_path: Optional[Path], enable_nla: bool, 
                  progress_callback=None, cancel_check=None,
                  frame_start=None, frame_end=None, frame_step=None,
-                 temp_blend_path: Optional[Path] = None):
+                 temp_blend_path: Optional[Path] = None,
+                 original_blend_path: Optional[Path] = None):
         self.workflow = workflow
         self.target_path = target_path
         self.enable_nla = enable_nla
@@ -724,6 +796,7 @@ class IncrementalPacker:
         self.frame_end = frame_end
         self.frame_step = frame_step
         self.temp_blend_path = temp_blend_path  # Temp file used as source (should be copied directly to root)
+        self.original_blend_path = original_blend_path  # Original blend file path (for cache lookup)
         
         # State tracking
         self.phase = 'INIT'
@@ -877,10 +950,23 @@ class IncrementalPacker:
                         self.copy_map[str(current_blend_abspath.resolve())] = str(target_path_file.resolve())
                     self.top_level_target_blend = target_path_file.resolve()
                     print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
-                    # Copy caches - only if not a temp file (temp files don't have caches)
-                    if not is_temp_file:
-                        print(f"[SheepIt Pack]   Copying blend caches...")
-                        copied_cache_dirs = copy_blend_caches(current_blend_abspath, target_path_file, self.missing_on_copy)
+                    # Copy caches - use original blend path for cache lookup if temp file
+                    cache_source_blend = self.original_blend_path if (is_temp_file and self.original_blend_path) else current_blend_abspath
+                    if cache_source_blend:
+                        print(f"[SheepIt Pack]   Copying blend caches from: {cache_source_blend}")
+                        # For COPY_ONLY workflow, filter caches during copy if frame range is specified
+                        filter_during_copy = (self.copy_only_mode and 
+                                             self.frame_start is not None and 
+                                             self.frame_end is not None and 
+                                             self.frame_step is not None)
+                        if filter_during_copy:
+                            print(f"[SheepIt Pack]   Filtering caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step}) during copy...")
+                        copied_cache_dirs = copy_blend_caches(
+                            cache_source_blend, target_path_file, self.missing_on_copy,
+                            frame_start=self.frame_start if filter_during_copy else None,
+                            frame_end=self.frame_end if filter_during_copy else None,
+                            frame_step=self.frame_step if filter_during_copy else None
+                        )
                         self.cache_dirs.extend(copied_cache_dirs)
                         print(f"[SheepIt Pack]   Copied {len(copied_cache_dirs)} cache directories")
                 except Exception as e:
@@ -890,13 +976,19 @@ class IncrementalPacker:
             # Prepare asset copy list
             total_assets = sum(len(links) for links in self.asset_usages.values())
             print(f"[SheepIt Pack] Preparing to copy {total_assets} asset files...")
+            
             for lib, links_to in self.asset_usages.items():
                 for asset_usage in links_to:
                     if asset_usage.abspath in self.copied_paths:
                         continue
                     try:
+                        # Try to get relative path to common root
                         asset_relpath = asset_usage.abspath.relative_to(self.common_root)
+                        # Use relative path as-is (even if it's just a filename)
+                        # This preserves the original relative structure
                     except ValueError:
+                        # Paths are not relative to common root (different drive/UNC), 
+                        # use compute_target_relpath to create DRIVE_C/UNC structure
                         asset_relpath = compute_target_relpath(asset_usage.abspath, self.common_root)
                     self.assets_to_copy.append((asset_usage, asset_relpath))
             
@@ -946,11 +1038,20 @@ class IncrementalPacker:
                 if self.missing_on_copy:
                     print(f"[SheepIt Pack]   Missing files: {[str(p) for p in self.missing_on_copy[:5]]}...")
                 # Check if we need to truncate caches
-                if self.frame_start is not None and self.frame_end is not None and self.frame_step is not None and self.cache_dirs:
+                # Skip truncation for COPY_ONLY workflow if caches were filtered during copy
+                caches_filtered_during_copy = (self.copy_only_mode and 
+                                             self.frame_start is not None and 
+                                             self.frame_end is not None and 
+                                             self.frame_step is not None)
+                if (self.frame_start is not None and self.frame_end is not None and 
+                    self.frame_step is not None and self.cache_dirs and 
+                    not caches_filtered_during_copy):
                     self.cache_truncate_index = 0
                     self.phase = 'TRUNCATING_CACHES'
                     return ('TRUNCATING_CACHES', False)
                 else:
+                    if caches_filtered_during_copy:
+                        print(f"[SheepIt Pack] Caches were filtered during copy, skipping truncation phase")
                     self.phase = 'FIND_DEPENDENCIES'
                     return ('FIND_DEPENDENCIES', False)
             else:
@@ -1281,7 +1382,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
             # Copy caches
             print(f"[SheepIt Pack]   Copying blend caches...")
-            cache_count = copy_blend_caches(current_blend_abspath, target_path_file, missing_on_copy)
+            # Legacy function doesn't support frame range filtering - copy all caches
+            cache_count = copy_blend_caches(current_blend_abspath, target_path_file, missing_on_copy,
+                                          frame_start=None, frame_end=None, frame_step=None)
             print(f"[SheepIt Pack]   Copied {cache_count} cache directories")
         except Exception as e:
             print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
@@ -1649,7 +1752,8 @@ class SHEEPIT_OT_pack_zip(Operator):
                         frame_start=self._frame_start,
                         frame_end=self._frame_end,
                         frame_step=self._frame_step,
-                        temp_blend_path=self._temp_blend_path
+                        temp_blend_path=self._temp_blend_path,
+                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -1830,7 +1934,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                             cancel_check=zip_cancel_check
                         )
                         
-                        # Rename ZIP to use blend file name with pack indicator
+                        # Rename ZIP to use blend file name, with suffix only if there's a conflict
                         # Extract blend file name
                         if self._original_filepath:
                             blend_name = Path(self._original_filepath).stem
@@ -1839,13 +1943,23 @@ class SHEEPIT_OT_pack_zip(Operator):
                         else:
                             blend_name = "untitled"
                         
-                        # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "sheepit_pack_0t2v99gf")
-                        pack_indicator = self._target_path.name
-                        if pack_indicator.startswith("sheepit_pack_"):
-                            pack_indicator = pack_indicator[len("sheepit_pack_"):]
+                        # Check if the desired ZIP name already exists in output directory
+                        desired_zip_name = f"{blend_name}.zip"
+                        desired_zip_path = self._output_dir / desired_zip_name
                         
-                        # Create new ZIP name: {blend_name}_{pack_indicator}.zip
-                        new_zip_name = f"{blend_name}_{pack_indicator}.zip"
+                        if desired_zip_path.exists():
+                            # File conflict - add suffix with pack indicator
+                            # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "sheepit_pack_0t2v99gf")
+                            pack_indicator = self._target_path.name
+                            if pack_indicator.startswith("sheepit_pack_"):
+                                pack_indicator = pack_indicator[len("sheepit_pack_"):]
+                            
+                            # Create new ZIP name with suffix: {blend_name}_{pack_indicator}.zip
+                            new_zip_name = f"{blend_name}_{pack_indicator}.zip"
+                        else:
+                            # No conflict - use simple name
+                            new_zip_name = desired_zip_name
+                        
                         new_zip_path = self._zip_path.parent / new_zip_name
                         
                         # Rename the ZIP file
@@ -2189,7 +2303,8 @@ class SHEEPIT_OT_pack_blend(Operator):
                         frame_start=self._frame_start,
                         frame_end=self._frame_end,
                         frame_step=self._frame_step,
-                        temp_blend_path=self._temp_blend_path
+                        temp_blend_path=self._temp_blend_path,
+                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None
                     )
                     
                     self._phase = 'PACKING_INIT'
