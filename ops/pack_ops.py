@@ -2530,66 +2530,47 @@ class SHEEPIT_OT_pack_blend(Operator):
 
 
 class SHEEPIT_OT_enable_nla(Operator):
-    """Enable NLA for all objects by disabling animation layers, removing actions, and enabling NLA. Only for use with the Animation Layers addon."""
+    """Enable NLA only on objects/rigs that have Animation Layers turned on (Animation Layers addon)."""
     bl_idname = "sheepit.enable_nla"
     bl_label = "Enable NLA"
-    bl_description = "Disable animation layers, remove current action, and enable NLA for all objects"
+    bl_description = "Disable animation layers, remove current action, and enable NLA on objects that have Animation Layers on"
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
-        """Execute the NLA enable operation."""
+        """Execute the NLA enable operation only on objects with Animation Layers on."""
         objects_processed = 0
         animation_layers_disabled = 0
         actions_removed = 0
         nla_enabled = 0
         
         for obj in bpy.data.objects:
-            # Check if object has animation_data
             ad = getattr(obj, 'animation_data', None)
             if not ad:
                 continue
+            anim_layers = getattr(obj, 'AnimLayersSettings', None) or getattr(obj, 'als', None)
+            turn_on = getattr(anim_layers, 'turn_on', None) if anim_layers else None
+            if anim_layers is None or turn_on is not True:
+                continue
             
             try:
-                # Check for animation layers and disable them
-                # Try AnimLayersSettings first
-                anim_layers = getattr(obj, 'AnimLayersSettings', None)
-                if anim_layers is None:
-                    # Try shorthand alias
-                    anim_layers = getattr(obj, 'als', None)
-                
-                if anim_layers is not None:
-                    turn_on = getattr(anim_layers, 'turn_on', None)
-                    if turn_on is True:
-                        anim_layers.turn_on = False
-                        animation_layers_disabled += 1
-                
-                # Remove current action
+                anim_layers.turn_on = False
+                animation_layers_disabled += 1
                 if ad.action is not None:
                     ad.action = None
                     actions_removed += 1
-                
-                # Enable NLA
-                if hasattr(ad, 'use_nla'):
-                    if not ad.use_nla:
-                        ad.use_nla = True
-                        nla_enabled += 1
-                
+                if hasattr(ad, 'use_nla') and not ad.use_nla:
+                    ad.use_nla = True
+                    nla_enabled += 1
                 objects_processed += 1
-                
             except Exception as e:
-                # Continue processing other objects even if one fails
                 print(f"[SheepIt NLA] Warning: Could not process object '{obj.name}': {e}")
-                continue
         
-        # Report results
         if objects_processed > 0:
-            self.report({'INFO'}, 
-                f"Processed {objects_processed} objects: "
-                f"{animation_layers_disabled} animation layers disabled, "
-                f"{actions_removed} actions removed, "
-                f"{nla_enabled} NLA enabled")
+            self.report({'INFO'},
+                f"Processed {objects_processed} objects (Animation Layers on): "
+                f"{animation_layers_disabled} disabled, {actions_removed} actions removed, {nla_enabled} NLA enabled")
         else:
-            self.report({'INFO'}, "No objects with animation data found.")
+            self.report({'INFO'}, "No objects with Animation Layers on found.")
         
         return {'FINISHED'}
 
