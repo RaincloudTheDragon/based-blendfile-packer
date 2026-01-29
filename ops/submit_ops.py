@@ -381,13 +381,17 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
     if progress_callback:
         progress_callback(0.0, "Counting files...")
     
-    # Count files first
+    # Collect all dirs (for empty-dir entries) and files
+    dir_arcs = set()
+    file_list = []
     file_count = 0
     total_size = 0
-    file_list = []  # Store file list for progress tracking
     for root, dirs, files in os.walk(directory):
+        root_path = Path(root)
+        for d in dirs:
+            dir_arcs.add(root_path.joinpath(d).relative_to(directory))
         for file in files:
-            file_path = Path(root) / file
+            file_path = root_path / file
             if not file_path.exists():
                 continue
             if exclude_video and file_path.suffix.lower() in _MEDIA_EXTENSIONS:
@@ -406,6 +410,9 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
     files_added = 0
     
     with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_STORED) as zipf:
+        for dir_arc in sorted(dir_arcs):
+            arcname = str(dir_arc).replace("\\", "/") + "/"
+            zipf.writestr(arcname, "")
         for file_path, arcname in file_list:
             if cancel_check and cancel_check():
                 raise InterruptedError("ZIP creation cancelled by user")

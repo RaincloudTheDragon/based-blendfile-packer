@@ -119,116 +119,215 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                       frame_start: Optional[int] = None, frame_end: Optional[int] = None, 
                       frame_step: Optional[int] = None) -> list[Path]:
     """Copy common cache folders for a given .blend next to its target copy.
-    
+
     If frame range parameters are provided, only copies cache files within that range.
     Otherwise, copies all cache files.
-    
-    Args:
-        src_blend: Source blend file path
-        dst_blend: Destination blend file path
-        missing_on_copy: List to append missing files to
-        frame_start: Optional start frame for filtering cache files
-        frame_end: Optional end frame for filtering cache files
-        frame_step: Optional frame step for filtering cache files
-    
-    Returns:
-        List of copied cache directory paths (for truncation, if needed)
+    On Windows we use robocopy when frame filtering; source path is kept as given (e.g. P:\)
+    so mapped drives work instead of resolving to UNC.
     """
     import re
+    import subprocess as _sub
     copied = []
+    # Keep source path as-is on Windows so P:\ stays P:\ (resolve can turn it into UNC and break robocopy)
+    if os.name != "nt":
+        src_blend = src_blend.resolve()
+    dst_blend = dst_blend.resolve()
     filter_by_frame = frame_start is not None and frame_end is not None and frame_step is not None
     valid_frames = None
-    
     if filter_by_frame:
         valid_frames = set(range(frame_start, frame_end + 1, frame_step))
-    
+
     def should_copy_file(file_path: Path) -> bool:
-        """Check if a cache file should be copied based on frame range."""
         if not filter_by_frame:
             return True
-        
         if not file_path.is_file():
-            return True  # Copy directories
-        
-        # Try to extract frame number from filename (same logic as truncate_caches_to_frame_range)
+            return True
         frame_num = None
-        # Pattern 1: frame_####.ext or cache_####.ext
         match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', file_path.stem, re.IGNORECASE)
         if match:
             frame_num = int(match.group(1))
         else:
-            # Pattern 2: Just numbers at end of filename
             match = re.search(r'(\d+)$', file_path.stem)
             if match:
                 frame_num = int(match.group(1))
-        
         if frame_num is None:
-            # If we can't determine frame number, copy it (safer to include than exclude)
             return True
-        
         return frame_num in valid_frames
-    
+
     def copy_tree_filtered(src: Path, dst: Path):
-        """Copy directory tree while filtering files based on frame range."""
         dst.mkdir(parents=True, exist_ok=True)
         for item in src.iterdir():
             src_item = src / item.name
             dst_item = dst / item.name
-            
             if src_item.is_dir():
                 copy_tree_filtered(src_item, dst_item)
-            elif src_item.is_file():
-                if should_copy_file(src_item):
-                    shutil.copy2(src_item, dst_item)
-    
+            elif src_item.is_file() and should_copy_file(src_item):
+                shutil.copy2(src_item, dst_item)
+
+    def _dst_has_files(p: Path) -> bool:
+        """True if directory exists and contains at least one file (quick check)."""
+        try:
+            if not p.exists() or not p.is_dir():
+                return False
+            for _ in p.rglob("*"):
+                return True  # at least one entry
+            return False
+        except Exception:
+            return False
+
     try:
         src_parent = src_blend.parent
         dst_parent = dst_blend.parent
         blendname = src_blend.stem
-
-        candidates = []
-        candidates.append((src_parent / f"blendcache_{blendname}", dst_parent / f"blendcache_{blendname}"))
-        candidates.append((src_parent / "bakes" / blendname, dst_parent / "bakes" / blendname))
-        
+        candidates = [
+            (src_parent / f"blendcache_{blendname}", dst_parent / f"blendcache_{blendname}"),
+        ]
+        # Only add bakes if it exists in the source (avoid creating empty bakes/ in pack)
+        bakes_src = src_parent / "bakes" / blendname
+        if bakes_src.exists() and bakes_src.is_dir():
+            candidates.append((bakes_src, dst_parent / "bakes" / blendname))
         try:
             for entry in src_parent.iterdir():
-                if not entry.is_dir():
-                    continue
-                if entry.name.startswith("cache_"):
+                if entry.is_dir() and entry.name.startswith("cache_"):
                     candidates.append((entry, dst_parent / entry.name))
         except Exception:
             pass
 
         for src_dir, dst_dir in candidates:
+            if os.name == "nt":
+                src_dir = src_dir  # keep as P:\ form, do not resolve to UNC
+            else:
+                src_dir = src_dir.resolve()
+            dst_dir = dst_dir.resolve()
             try:
-                if src_dir.exists() and src_dir.is_dir():
-                    if filter_by_frame:
-                        # Filter during copy
+                # On Windows with frame filter: try Python copy first; if 0 files or PermissionError, use robocopy
+                if filter_by_frame and os.name == "nt":
+                    def _try_robocopy():
+                        robocopy_exe = (getattr(shutil, "which", lambda x: None)("robocopy")
+                            or os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "robocopy.exe")
+                            or "robocopy")
+                        src_str = str(src_dir)
+                        dst_str = str(dst_dir)
+                        print(f"[SheepIt Pack]   robocopy: {src_str} -> {dst_str}")
+                        cmd = f'"{robocopy_exe}" "{src_str}" "{dst_str}" /E /R:2 /W:1 /NFL /NDL /NJH /NJS'
+                        rc = _sub.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+                        print(f"[SheepIt Pack]   robocopy exit code: {rc.returncode}")
+                        return rc.returncode
+                    dst_dir.parent.mkdir(parents=True, exist_ok=True)
+                    if dst_dir.exists():
                         try:
-                            copy_tree_filtered(src_dir, dst_dir)
-                            copied.append(dst_dir)
-                            continue
-                        except Exception as e:
-                            print(f"[SheepIt Pack] WARNING: Error copying filtered cache {src_dir.name}: {e}")
+                            shutil.rmtree(dst_dir)
+                        except Exception:
+                            pass
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    used_robocopy = False
+                    try:
+                        src_exists = src_dir.exists()
+                        src_count = "n/a"
+                        if src_exists:
+                            try:
+                                src_count = sum(1 for _ in src_dir.rglob("*"))
+                            except Exception:
+                                src_count = "?"
+                        print(f"[SheepIt Pack]   {src_dir.name}: exists={src_exists}, items={src_count}")
+                        copy_tree_filtered(src_dir, dst_dir)
+                    except PermissionError:
+                        used_robocopy = True
+                        rc = _try_robocopy()
+                        if rc >= 8:
                             missing_on_copy.append(src_dir)
+                            if dst_dir.exists() and not _dst_has_files(dst_dir):
+                                try:
+                                    shutil.rmtree(dst_dir)
+                                except Exception:
+                                    pass
                             continue
-                    else:
-                        # Copy all files (original behavior)
-                        dst_dir.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+                    except Exception as e:
+                        print(f"[SheepIt Pack]   WARNING: cache copy failed for {src_dir.name}: {e}")
+                        used_robocopy = True
+                        rc = _try_robocopy()
+                        if rc >= 8 or not _dst_has_files(dst_dir):
+                            missing_on_copy.append(src_dir)
+                            if dst_dir.exists() and not _dst_has_files(dst_dir):
+                                try:
+                                    shutil.rmtree(dst_dir)
+                                except Exception:
+                                    pass
+                            continue
+                    if not _dst_has_files(dst_dir) and not used_robocopy:
+                        print(f"[SheepIt Pack]   {src_dir.name}: Python copy produced 0 files, trying robocopy")
+                        used_robocopy = True
+                        rc = _try_robocopy()
+                        if rc >= 8 or not _dst_has_files(dst_dir):
+                            if dst_dir.exists() and not _dst_has_files(dst_dir):
+                                try:
+                                    shutil.rmtree(dst_dir)
+                                except Exception:
+                                    pass
+                            continue
+                    if _dst_has_files(dst_dir):
+                        n_before = sum(1 for _ in dst_dir.rglob("*") if _.is_file())
+                        if not used_robocopy:
+                            truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
+                        else:
+                            print(f"[SheepIt Pack]   {dst_dir.name}: keeping full cache ({n_before} files, robocopy)")
+                        if _dst_has_files(dst_dir):
+                            n_after = sum(1 for _ in dst_dir.rglob("*") if _.is_file())
+                            if used_robocopy:
+                                print(f"[SheepIt Pack]   {dst_dir.name}: {n_after} files")
+                            else:
+                                print(f"[SheepIt Pack]   {dst_dir.name}: {n_before} files before truncate, {n_after} after")
                             copied.append(dst_dir)
-                            continue
-                        except PermissionError as e:
-                            if os.name == "nt":
-                                import subprocess as _sub
-                                rc = _sub.run([
-                                    "robocopy", str(src_dir), str(dst_dir), "/E", "/R:2", "/W:1"
-                                ], capture_output=True, text=True)
-                                if rc.returncode < 8:
-                                    copied.append(dst_dir)
-                                    continue
-                            raise e
+                        else:
+                            print(f"[SheepIt Pack]   {dst_dir.name}: empty after truncate, skipping")
+                            try:
+                                shutil.rmtree(dst_dir)
+                            except Exception:
+                                pass
+                    continue
+                if not src_dir.exists() or not src_dir.is_dir():
+                    continue
+                # Don't pre-create dst_dir for non-Windows path; copy_tree/copytree will create it
+                dst_dir.parent.mkdir(parents=True, exist_ok=True)
+                if dst_dir.exists():
+                    try:
+                        shutil.rmtree(dst_dir)
+                    except Exception:
+                        pass
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                if filter_by_frame:
+                    try:
+                        copy_tree_filtered(src_dir, dst_dir)
+                        if _dst_has_files(dst_dir):
+                            copied.append(dst_dir)
+                    except PermissionError:
+                        if os.name == "nt":
+                            rc = _sub.run(
+                                ["robocopy", str(src_dir), str(dst_dir), "/E", "/R:2", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS"],
+                                capture_output=True, text=True,
+                            )
+                            if rc.returncode < 8 and _dst_has_files(dst_dir):
+                                truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
+                                copied.append(dst_dir)
+                        else:
+                            missing_on_copy.append(src_dir)
+                    except Exception as e:
+                        print(f"[SheepIt Pack] WARNING: Error copying filtered cache {src_dir.name}: {e}")
+                        missing_on_copy.append(src_dir)
+                else:
+                    try:
+                        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+                        copied.append(dst_dir)
+                    except PermissionError:
+                        if os.name == "nt":
+                            rc = _sub.run(
+                                ["robocopy", str(src_dir), str(dst_dir), "/E", "/R:2", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS"],
+                                capture_output=True, text=True,
+                            )
+                            if rc.returncode < 8:
+                                copied.append(dst_dir)
+                        else:
+                            missing_on_copy.append(src_dir)
             except Exception as e:
                 missing_on_copy.append(src_dir)
     except Exception:
@@ -980,6 +1079,13 @@ class IncrementalPacker:
             for lib, links_to in self.asset_usages.items():
                 for asset_usage in links_to:
                     if asset_usage.abspath in self.copied_paths:
+                        continue
+                    # Skip cache directories: already copied in copy_blend_caches from blend dir;
+                    # including them here would try UNC path and fail with PermissionError.
+                    name = asset_usage.abspath.name
+                    if name.startswith("blendcache_") or name.startswith("cache_") or (
+                        len(asset_usage.abspath.parts) >= 2 and asset_usage.abspath.parts[-2] == "bakes"
+                    ):
                         continue
                     try:
                         # Try to get relative path to common root
@@ -2577,9 +2683,109 @@ class SHEEPIT_OT_enable_nla(Operator):
         return {'FINISHED'}
 
 
+class SHEEPIT_OT_pack_zip_sync(Operator):
+    """Pack project as ZIP synchronously (for scripting/MCP). Same as Pack as ZIP but runs to completion in one call."""
+    bl_idname = "sheepit.pack_zip_sync"
+    bl_label = "Pack as ZIP (Sync)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .submit_ops import (
+            save_current_blend_with_frame_range,
+            apply_frame_range_to_blend,
+            create_zip_from_directory,
+        )
+        try:
+            from ..utils.compat import get_addon_prefs
+        except Exception:
+            get_addon_prefs = lambda: None
+        submit_settings = context.scene.sheepit_submit
+        output_dir = submit_settings.output_path
+        if not output_dir:
+            prefs = get_addon_prefs()
+            if prefs and prefs.default_output_path:
+                output_dir = prefs.default_output_path
+        if not output_dir:
+            self.report({'ERROR'}, "Please specify an output path.")
+            return {'CANCELLED'}
+        submit_settings.is_submitting = True
+        output_dir = Path(output_dir)
+        original_filepath = bpy.data.filepath
+        blend_name = Path(original_filepath).stem if original_filepath else "untitled"
+        try:
+            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+        except Exception as e:
+            submit_settings.is_submitting = False
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        au = _get_asset_usage_module()
+        import functools
+        _orig_lib_abspath = au.library_abspath
+        temp_file_path = temp_blend_path.resolve()
+        def _override(lib):
+            return temp_file_path if lib is None else _orig_lib_abspath(lib)
+        au.library_abspath.cache_clear()
+        au.library_abspath = functools.lru_cache(maxsize=None)(_override)
+        def _progress(pct, msg):
+            submit_settings.submit_progress = 15.0 + (pct * 0.46)
+            submit_settings.submit_status_message = msg
+        packer = IncrementalPacker(
+            WorkflowMode.COPY_ONLY,
+            target_path=None,
+            enable_nla=False,
+            progress_callback=_progress,
+            cancel_check=lambda: False,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            frame_step=frame_step,
+            temp_blend_path=temp_blend_path,
+            original_blend_path=Path(original_filepath) if original_filepath else None,
+        )
+        try:
+            while True:
+                next_phase, is_complete = packer.process_batch(batch_size=20)
+                if is_complete:
+                    break
+            target_path = packer.target_path
+        except Exception as e:
+            au.library_abspath.cache_clear()
+            au.library_abspath = _orig_lib_abspath
+            submit_settings.is_submitting = False
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        for blend_file in target_path.rglob("*.blend"):
+            if blend_file.exists():
+                apply_frame_range_to_blend(blend_file, frame_start, frame_end, frame_step)
+        au.library_abspath.cache_clear()
+        au.library_abspath = _orig_lib_abspath
+        zip_path = target_path.parent / f"{target_path.name}.zip"
+        exclude_video = getattr(submit_settings, 'exclude_video_from_zip', False)
+        create_zip_from_directory(target_path, zip_path, cancel_check=lambda: False, exclude_video=exclude_video)
+        desired_zip_name = f"{blend_name}.zip"
+        desired_zip_path = output_dir / desired_zip_name
+        pack_indicator = target_path.name
+        if pack_indicator.startswith("sheepit_pack_"):
+            pack_indicator = pack_indicator[len("sheepit_pack_"):]
+        new_zip_name = f"{blend_name}_{pack_indicator}.zip" if desired_zip_path.exists() else desired_zip_name
+        final_zip_path = output_dir / new_zip_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(zip_path), str(final_zip_path))
+        if temp_blend_path.exists():
+            try:
+                temp_blend_path.unlink()
+            except Exception:
+                pass
+        submit_settings.is_submitting = False
+        submit_settings.submit_progress = 100.0
+        submit_settings.submit_status_message = ""
+        self.report({'INFO'}, f"ZIP saved to: {final_zip_path}")
+        return {'FINISHED'}
+
+
 def register():
     """Register operators."""
     bpy.utils.register_class(SHEEPIT_OT_pack_zip)
+    bpy.utils.register_class(SHEEPIT_OT_pack_zip_sync)
     bpy.utils.register_class(SHEEPIT_OT_pack_blend)
     bpy.utils.register_class(SHEEPIT_OT_enable_nla)
 
@@ -2588,4 +2794,5 @@ def unregister():
     """Unregister operators."""
     bpy.utils.unregister_class(SHEEPIT_OT_enable_nla)
     bpy.utils.unregister_class(SHEEPIT_OT_pack_blend)
+    bpy.utils.unregister_class(SHEEPIT_OT_pack_zip_sync)
     bpy.utils.unregister_class(SHEEPIT_OT_pack_zip)
