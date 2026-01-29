@@ -117,7 +117,8 @@ def compute_target_relpath(abs_path: Path, base_root: Path) -> Path:
 
 def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list, 
                       frame_start: Optional[int] = None, frame_end: Optional[int] = None, 
-                      frame_step: Optional[int] = None) -> list[Path]:
+                      frame_step: Optional[int] = None,
+                      copy_map_out: Optional[dict] = None) -> list[Path]:
     """Copy common cache folders for a given .blend next to its target copy.
 
     If frame range parameters are provided, only copies cache files within that range.
@@ -137,19 +138,28 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
     if filter_by_frame:
         valid_frames = set(range(frame_start, frame_end + 1, frame_step))
 
+    def _frame_from_stem(stem: str) -> Optional[int]:
+        """Extract frame number from cache filename (matches truncate patterns)."""
+        match = re.search(r'_(\d+)_\d+$', stem)  # Blender bphys: name_frame_index
+        if match:
+            return int(match.group(1))
+        match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', stem, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'(?:fluid_|cloth_|softbody_|particles_|pointcache_|sim_)(\d+)', stem, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'(\d+)$', stem)
+        if match:
+            return int(match.group(1))
+        return None
+
     def should_copy_file(file_path: Path) -> bool:
         if not filter_by_frame:
             return True
         if not file_path.is_file():
             return True
-        frame_num = None
-        match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', file_path.stem, re.IGNORECASE)
-        if match:
-            frame_num = int(match.group(1))
-        else:
-            match = re.search(r'(\d+)$', file_path.stem)
-            if match:
-                frame_num = int(match.group(1))
+        frame_num = _frame_from_stem(file_path.stem)
         if frame_num is None:
             return True
         return frame_num in valid_frames
@@ -192,6 +202,12 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                     candidates.append((entry, dst_parent / entry.name))
         except Exception:
             pass
+
+        def _add_cache_dir_to_map(sdir: Path, ddir: Path):
+            if copy_map_out is not None:
+                copy_map_out[str(Path(sdir).resolve())] = str(ddir.resolve())
+                if os.name == "nt" and str(sdir) != str(Path(sdir).resolve()):
+                    copy_map_out[str(sdir)] = str(ddir.resolve())
 
         for src_dir, dst_dir in candidates:
             if os.name == "nt":
@@ -267,16 +283,11 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                             continue
                     if _dst_has_files(dst_dir):
                         n_before = sum(1 for _ in dst_dir.rglob("*") if _.is_file())
-                        if not used_robocopy:
-                            truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
-                        else:
-                            print(f"[SheepIt Pack]   {dst_dir.name}: keeping full cache ({n_before} files, robocopy)")
+                        truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
                         if _dst_has_files(dst_dir):
                             n_after = sum(1 for _ in dst_dir.rglob("*") if _.is_file())
-                            if used_robocopy:
-                                print(f"[SheepIt Pack]   {dst_dir.name}: {n_after} files")
-                            else:
-                                print(f"[SheepIt Pack]   {dst_dir.name}: {n_before} files before truncate, {n_after} after")
+                            print(f"[SheepIt Pack]   {dst_dir.name}: {n_before} files before truncate, {n_after} after")
+                            _add_cache_dir_to_map(src_dir, dst_dir)
                             copied.append(dst_dir)
                         else:
                             print(f"[SheepIt Pack]   {dst_dir.name}: empty after truncate, skipping")
@@ -299,6 +310,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                     try:
                         copy_tree_filtered(src_dir, dst_dir)
                         if _dst_has_files(dst_dir):
+                            _add_cache_dir_to_map(src_dir, dst_dir)
                             copied.append(dst_dir)
                     except PermissionError:
                         if os.name == "nt":
@@ -308,6 +320,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                             )
                             if rc.returncode < 8 and _dst_has_files(dst_dir):
                                 truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
+                                _add_cache_dir_to_map(src_dir, dst_dir)
                                 copied.append(dst_dir)
                         else:
                             missing_on_copy.append(src_dir)
@@ -317,6 +330,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                 else:
                     try:
                         shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+                        _add_cache_dir_to_map(src_dir, dst_dir)
                         copied.append(dst_dir)
                     except PermissionError:
                         if os.name == "nt":
@@ -325,6 +339,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                                 capture_output=True, text=True,
                             )
                             if rc.returncode < 8:
+                                _add_cache_dir_to_map(src_dir, dst_dir)
                                 copied.append(dst_dir)
                         else:
                             missing_on_copy.append(src_dir)
@@ -343,38 +358,57 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
     
     Handles common cache naming patterns:
     - Numbered sequences: frame_0001.vdb, frame_0002.vdb, cache_fluid_0042.bphys.gz, etc.
-    - Extract frame numbers using regex: r'(\d+)' or r'frame_(\d+)', r'cache.*?(\d+)', etc.
+    - Physics/simulation: fluid_####, cloth_####, softbody_####, particles_####, pointcache_####
     - Only keep files where extracted frame number is within [frame_start, frame_end] and matches frame_step
+    
+    If no files would remain after truncation (e.g. naming not recognized or all outside range),
+    no files are deleted so the cache is not emptied by mistake.
     
     Returns number of files removed.
     """
     import re
-    files_removed = 0
     valid_frames = set(range(frame_start, frame_end + 1, frame_step))
-    
+    to_remove = []
+    would_keep_count = 0
+
     for cache_file in cache_dir.rglob("*"):
         if not cache_file.is_file():
             continue
-        
-        # Try to extract frame number from filename
+
         frame_num = None
-        # Pattern 1: frame_####.ext or cache_####.ext
-        match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', cache_file.stem, re.IGNORECASE)
+        stem = cache_file.stem
+        # Blender bphys: name_frame_index (frame is middle number, index is last)
+        match = re.search(r'_(\d+)_\d+$', stem)
         if match:
             frame_num = int(match.group(1))
-        else:
-            # Pattern 2: Just numbers at end of filename
-            match = re.search(r'(\d+)$', cache_file.stem)
+        if frame_num is None:
+            match = re.search(r'(?:frame_|cache[^_]*_)(\d+)', stem, re.IGNORECASE)
             if match:
                 frame_num = int(match.group(1))
-        
-        if frame_num is not None and frame_num not in valid_frames:
-            try:
-                cache_file.unlink()
-                files_removed += 1
-            except Exception as e:
-                print(f"[SheepIt Pack] WARNING: Could not remove {cache_file.name}: {e}")
-    
+        if frame_num is None:
+            match = re.search(r'(?:fluid_|cloth_|softbody_|particles_|pointcache_|sim_)(\d+)', stem, re.IGNORECASE)
+            if match:
+                frame_num = int(match.group(1))
+        if frame_num is None:
+            match = re.search(r'(\d+)$', stem)
+            if match:
+                frame_num = int(match.group(1))
+
+        if frame_num is None or frame_num in valid_frames:
+            would_keep_count += 1
+        else:
+            to_remove.append(cache_file)
+
+    if would_keep_count == 0 and to_remove:
+        print(f"[SheepIt Pack]   {cache_dir.name}: no files in frame range {frame_start}-{frame_end} (naming may differ), keeping full cache")
+        return 0
+    files_removed = 0
+    for cache_file in to_remove:
+        try:
+            cache_file.unlink()
+            files_removed += 1
+        except Exception as e:
+            print(f"[SheepIt Pack] WARNING: Could not remove {cache_file.name}: {e}")
     return files_removed
 
 
@@ -564,6 +598,69 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "            except Exception:\n"
         "                images_remapped += 1\n"
         "print(f'Remapped {{images_remapped}} image/texture paths')\n"
+        "# Remap physics/point cache paths (particle systems, cloth, soft body, etc.)\n"
+        "caches_remapped = 0\n"
+        "def remap_abs_to_rel(abs_src):\n"
+        "    key = str(abs_src)\n"
+        "    new_abs = None\n"
+        "    try:\n"
+        "        if abs_src.relative_to(target_path):\n"
+        "            new_abs = abs_src\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    if new_abs is None and key in copy_map:\n"
+        "        new_abs = Path(copy_map[key])\n"
+        "    if new_abs is None:\n"
+        "        for src_prefix in sorted(copy_map.keys(), key=lambda x: -len(x)):\n"
+        "            try:\n"
+        "                rel = abs_src.relative_to(Path(src_prefix))\n"
+        "                candidate = (Path(copy_map[src_prefix]) / rel).resolve()\n"
+        "                if candidate.exists():\n"
+        "                    new_abs = candidate\n"
+        "                    break\n"
+        "            except (ValueError, KeyError):\n"
+        "                pass\n"
+        "    if new_abs is None:\n"
+        "        try:\n"
+        "            rel_to_root = abs_src.relative_to(common_root)\n"
+        "            new_abs = (target_path / rel_to_root).resolve()\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    if new_abs is not None and new_abs.exists():\n"
+        "        try:\n"
+        "            rel_path = bpy.path.relpath(str(new_abs))\n"
+        "            return rel_path\n"
+        "        except Exception:\n"
+        "            return str(new_abs)\n"
+        "    return None\n"
+        "def do_remap_path(src):\n"
+        "    if not src or src in ('', '<builtin>', '<memory>'):\n"
+        "        return None\n"
+        "    if src.startswith('//'):\n"
+        "        abs_src = (blend_dir / src[2:]).resolve()\n"
+        "    else:\n"
+        "        abs_src = Path(src).resolve()\n"
+        "    new_path = remap_abs_to_rel(abs_src)\n"
+        "    if new_path is not None:\n"
+        "        return new_path\n"
+        "    return None\n"
+        "for obj in bpy.data.objects:\n"
+        "    for mod in getattr(obj, 'modifiers', []):\n"
+        "        ps = getattr(mod, 'particle_system', None)\n"
+        "        if ps and getattr(ps, 'point_cache', None):\n"
+        "            pc = ps.point_cache\n"
+        "            if getattr(pc, 'filepath', None):\n"
+        "                new_path = do_remap_path(pc.filepath)\n"
+        "                if new_path is not None:\n"
+        "                    pc.filepath = new_path\n"
+        "                    caches_remapped += 1\n"
+        "        pc = getattr(mod, 'point_cache', None)\n"
+        "        if pc and getattr(pc, 'filepath', None):\n"
+        "            new_path = do_remap_path(pc.filepath)\n"
+        "            if new_path is not None:\n"
+        "                pc.filepath = new_path\n"
+        "                caches_remapped += 1\n"
+        "print(f'Remapped {{caches_remapped}} physics/point cache paths')\n"
         "# Save after remapping\n"
         "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
         "# Make all paths relative\n"
@@ -1064,7 +1161,8 @@ class IncrementalPacker:
                             cache_source_blend, target_path_file, self.missing_on_copy,
                             frame_start=self.frame_start if filter_during_copy else None,
                             frame_end=self.frame_end if filter_during_copy else None,
-                            frame_step=self.frame_step if filter_during_copy else None
+                            frame_step=self.frame_step if filter_during_copy else None,
+                            copy_map_out=self.copy_map,
                         )
                         self.cache_dirs.extend(copied_cache_dirs)
                         print(f"[SheepIt Pack]   Copied {len(copied_cache_dirs)} cache directories")
@@ -1490,7 +1588,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             print(f"[SheepIt Pack]   Copying blend caches...")
             # Legacy function doesn't support frame range filtering - copy all caches
             cache_count = copy_blend_caches(current_blend_abspath, target_path_file, missing_on_copy,
-                                          frame_start=None, frame_end=None, frame_step=None)
+                                          frame_start=None, frame_end=None, frame_step=None,
+                                          copy_map_out=copy_map)
             print(f"[SheepIt Pack]   Copied {cache_count} cache directories")
         except Exception as e:
             print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
@@ -1920,30 +2019,20 @@ class SHEEPIT_OT_pack_zip(Operator):
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_PACKED':
                     print(f"[SheepIt Pack] DEBUG: Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
                     submit_settings.submit_progress = 60.0
-                    submit_settings.submit_status_message = "Applying frame range to packed files..."
+                    submit_settings.submit_status_message = "Applying frame range to target blend..."
                     
                     from .submit_ops import apply_frame_range_to_blend
                     
-                    print(f"[SheepIt Pack] DEBUG: Searching for blend files in: {self._target_path}")
-                    # Apply frame range to all blend files in the packed directory
-                    blend_files = list(self._target_path.rglob("*.blend"))
-                    print(f"[SheepIt Pack] DEBUG: Found {len(blend_files)} blend files")
-                    
-                    for i, blend_file in enumerate(blend_files, 1):
-                        # Check for cancellation
-                        if not submit_settings.is_submitting:
-                            print(f"[SheepIt Pack] DEBUG: Cancellation detected in APPLYING_FRAME_RANGE_TO_PACKED")
-                            raise InterruptedError("Packing cancelled by user")
-                        if blend_file.exists():
-                            progress_pct = 60.0 + (i / len(blend_files) * 2.0) if blend_files else 60.0
-                            submit_settings.submit_progress = progress_pct
-                            submit_settings.submit_status_message = f"Applying frame range... ({i}/{len(blend_files)})"
-                            print(f"[SheepIt Pack] DEBUG: [{i}/{len(blend_files)}] Applying frame range to: {blend_file.name} ({progress_pct:.1f}%)")
-                            apply_frame_range_to_blend(blend_file, self._frame_start, self._frame_end, self._frame_step)
-                            # Force UI redraw after each file
-                            for area in context.screen.areas:
-                                if area.type == 'PROPERTIES':
-                                    area.tag_redraw()
+                    # Apply frame range only to the target (top-level) blend, not dependent blends
+                    target_blend = self._packer.top_level_target_blend if self._packer else None
+                    if target_blend and target_blend.exists():
+                        print(f"[SheepIt Pack] DEBUG: Applying frame range to target blend: {target_blend.name}")
+                        apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
+                        for area in context.screen.areas:
+                            if area.type == 'PROPERTIES':
+                                area.tag_redraw()
+                    else:
+                        print(f"[SheepIt Pack] DEBUG: No target blend to apply frame range to")
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
                     print(f"[SheepIt Pack] DEBUG: Transitioning to RESTORING_LIBRARY_ABSPATH phase")
@@ -2753,9 +2842,10 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
             submit_settings.is_submitting = False
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        for blend_file in target_path.rglob("*.blend"):
-            if blend_file.exists():
-                apply_frame_range_to_blend(blend_file, frame_start, frame_end, frame_step)
+        # Apply frame range only to the target blend, not dependent blends
+        target_blend = packer.top_level_target_blend if packer else None
+        if target_blend and target_blend.exists():
+            apply_frame_range_to_blend(target_blend, frame_start, frame_end, frame_step)
         au.library_abspath.cache_clear()
         au.library_abspath = _orig_lib_abspath
         zip_path = target_path.parent / f"{target_path.name}.zip"
