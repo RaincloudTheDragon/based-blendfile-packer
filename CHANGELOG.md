@@ -1,3 +1,20 @@
+## [v0.0.4] - 2026-01-27
+
+### Added
+- ZIP pack: option to exclude video and audio files from archive
+- Default output path in preferences
+- NLA enable for animation layers (moved to UI panel; only runs on objects with anim layers)
+
+### Fixed
+- Physics/point cache included in ZIP pack (robocopy fallback when Python copy fails on network paths)
+- Cache truncated to frame range (Blender bphys `name_frame_index` naming; safeguard if no files match)
+- External cache paths remapped to relative (cache dirs in copy_map; prefix matching in remap script)
+- Frame range applied only to top-level target blend, not dependent blends
+- Recursion issue in all three pack ops; send-current-blend path handling
+- Removed packed-suffix behavior
+
+---
+
 ## [v0.0.3] - 2026-01-22
 
 ### Changed
@@ -5,6 +22,8 @@
 - Operators now save packed files to user-specified locations instead of uploading
 - All authentication and website interaction code has been removed
 - Users must manually upload and configure projects on the SheepIt website
+
+---
 
 ## [v0.0.2] - 2026-01-22
 
@@ -17,6 +36,8 @@
 ### Internal
 - Refactored `batter.asset_usage` import to use `importlib` without violating extension policies
 - Module now properly registered in `sys.modules` as a submodule before execution
+
+---
 
 ## [v0.0.1] - 2026-01-21
 
