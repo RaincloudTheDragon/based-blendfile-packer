@@ -1927,11 +1927,13 @@ class SHEEPIT_OT_pack_zip(Operator):
                         return not submit_settings.is_submitting
                     
                     try:
+                        exclude_video = getattr(context.scene.sheepit_submit, 'exclude_video_from_zip', False)
                         create_zip_from_directory(
-                            self._target_path, 
+                            self._target_path,
                             self._zip_path,
                             progress_callback=zip_progress_callback,
-                            cancel_check=zip_cancel_check
+                            cancel_check=zip_cancel_check,
+                            exclude_video=exclude_video,
                         )
                         
                         # Rename ZIP to use blend file name, with suffix only if there's a conflict

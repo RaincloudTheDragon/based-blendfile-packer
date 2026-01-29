@@ -68,8 +68,9 @@ class SHEEPIT_PT_output_panel(Panel):
         # Pack Current Blend button (first)
         op = col.operator("sheepit.submit_current", text="Pack Current Blend", icon='EXPORT')
         
-        # Pack as ZIP button
         op = col.operator("sheepit.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
+        row = layout.row()
+        row.prop(submit_settings, "exclude_video_from_zip", text="Exclude video/audio from ZIP")
         
         # Pack as Blend button
         op = col.operator("sheepit.pack_blend", text="Pack as Blend", icon='FILE_BLEND')

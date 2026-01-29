@@ -333,7 +333,14 @@ class SHEEPIT_OT_submit_current(Operator):
         pass
 
 
-def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None) -> None:
+# Video and audio extensions to exclude when exclude_video=True
+_MEDIA_EXTENSIONS = frozenset({
+    '.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.ogv', '.mpg', '.mpeg', '.m2v',
+    '.wav', '.mp3', '.ogg', '.flac', '.aac', '.m4a', '.wma', '.opus', '.aiff', '.aif',
+})
+
+
+def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None, exclude_video: bool = False) -> None:
     """Create a ZIP file from a directory.
     
     Args:
@@ -341,6 +348,7 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
         output_zip: Output ZIP file path
         progress_callback: Optional callback(progress_pct, message) for progress updates
         cancel_check: Optional callback() -> bool to check for cancellation
+        exclude_video: If True, skip common video and audio file extensions
     """
     import time
     
@@ -380,10 +388,13 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
     for root, dirs, files in os.walk(directory):
         for file in files:
             file_path = Path(root) / file
-            if file_path.exists():
-                file_count += 1
-                total_size += file_path.stat().st_size
-                file_list.append((file_path, file_path.relative_to(directory)))
+            if not file_path.exists():
+                continue
+            if exclude_video and file_path.suffix.lower() in _MEDIA_EXTENSIONS:
+                continue
+            file_count += 1
+            total_size += file_path.stat().st_size
+            file_list.append((file_path, file_path.relative_to(directory)))
     
     print(f"[SheepIt Submit]   Found {file_count} files, total size: {total_size / (1024*1024):.2f} MB")
     print(f"[SheepIt Submit]   Creating ZIP (this may take a while)...")

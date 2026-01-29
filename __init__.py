@@ -96,6 +96,13 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         default=False,
     )
     
+    # ZIP pack: exclude video/audio files
+    exclude_video_from_zip: bpy.props.BoolProperty(
+        name="Exclude video/audio from ZIP",
+        description="Exclude video and audio files (e.g. mp4, avi, mov, wav, mp3) from the ZIP pack",
+        default=False,
+    )
+    
     # Pack output path (set by pack operators)
     pack_output_path: bpy.props.StringProperty(
         name="Pack Output Path",
