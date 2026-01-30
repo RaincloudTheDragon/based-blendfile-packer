@@ -103,6 +103,15 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         default=False,
     )
     
+    # Project size limit (GB); 0 = no limit (max 32-bit signed int for Blender C API)
+    project_size_limit_gb: bpy.props.IntProperty(
+        name="Project Size Limit (GB)",
+        description="Maximum project/ZIP/blend size in GB (0 = no limit)",
+        default=2,
+        min=0,
+        max=(1 << 31) - 1,
+    )
+    
     # Pack output path (set by pack operators)
     pack_output_path: bpy.props.StringProperty(
         name="Pack Output Path",

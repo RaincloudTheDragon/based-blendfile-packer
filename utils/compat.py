@@ -52,10 +52,14 @@ def get_addon_prefs():
     Returns:
         AddonPreferences or None: The addon preferences instance if found
     """
+    from . import config
     prefs = bpy.context.preferences
+    addon = prefs.addons.get(config.ADDON_ID, None)
+    if addon and getattr(addon, "preferences", None):
+        return addon.preferences
     for addon in prefs.addons.values():
         ap = getattr(addon, "preferences", None)
-        if ap and hasattr(ap, "sheepit_username"):
+        if ap and hasattr(ap, "default_output_path"):
             return ap
     return None
 

@@ -748,16 +748,35 @@ def pack_all_in_blend(blend_path: Path) -> list[Path]:
     return missing
 
 
-def pack_linked_in_blend(blend_path: Path) -> tuple[list[Path], list[Path]]:
+def _get_project_size_limit_bytes(context=None):
+    """Return project size limit in bytes from scene (per-pack). 0 = no limit (returns None)."""
+    try:
+        scene = context.scene if context else bpy.context.scene
+        st = getattr(scene, "sheepit_submit", None)
+        if not st or not hasattr(st, "project_size_limit_gb"):
+            return 2 * 1024 * 1024 * 1024
+        gb = getattr(st, "project_size_limit_gb", 2)
+        if gb <= 0:
+            return None
+        return int(gb * (1024 ** 3))
+    except Exception:
+        return 2 * 1024 * 1024 * 1024
+
+
+def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None) -> tuple[list[Path], list[Path]]:
     """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
+    
+    Args:
+        blend_path: Path to the blend file.
+        max_size_bytes: Max size in bytes for a single linked file (over this = oversized). None = 2GB.
     
     Returns:
         Tuple of (missing_files: list[Path], oversized_files: list[Path])
         - missing_files: Files that don't exist and couldn't be packed
-        - oversized_files: Files over 2GB that Blender can't pack
+        - oversized_files: Files over max_size_bytes that Blender can't pack
     """
-    # 2GB limit (2 * 1024 * 1024 * 1024 bytes)
-    MAX_PACKABLE_SIZE = 2 * 1024 * 1024 * 1024
+    if max_size_bytes is None:
+        max_size_bytes = 2 * 1024 * 1024 * 1024
     
     script = (
         "import bpy\n"
@@ -777,15 +796,15 @@ def pack_linked_in_blend(blend_path: Path) -> tuple[list[Path], list[Path]]:
         "    else:\n"
         "        file_size = lib_path.stat().st_size\n"
         "        file_size_gb = file_size / (1024 * 1024 * 1024)\n"
-        "        if file_size > " + str(MAX_PACKABLE_SIZE) + ":\n"
+        "        if file_size > " + str(max_size_bytes) + ":\n"
         "            oversized_files.append(str(lib_path))\n"
-        "            print(f'  Library (OVER 2GB, cannot pack): {lib.name}, path: {lib.filepath}, size: {file_size_gb:.2f} GB')\n"
+        "            print(f'  Library (OVER limit, cannot pack): {lib.name}, path: {lib.filepath}, size: {file_size_gb:.2f} GB')\n"
         "        else:\n"
         "            print(f'  Library (found, {file_size_gb:.2f} GB): {lib.name}, path: {lib.filepath}')\n"
         "if missing_files:\n"
         "    print(f'WARNING: {len(missing_files)} linked libraries not found and cannot be packed')\n"
         "if oversized_files:\n"
-        "    print(f'WARNING: {len(oversized_files)} linked libraries are over 2GB and cannot be packed by Blender')\n"
+        "    print(f'WARNING: {len(oversized_files)} linked libraries are over size limit and cannot be packed by Blender')\n"
         "try:\n"
         "    bpy.ops.file.make_paths_relative()\n"
         "    print('Made paths relative')\n"
@@ -902,13 +921,13 @@ def pack_linked_in_blend(blend_path: Path) -> tuple[list[Path], list[Path]]:
         print(f"[SheepIt Pack]   Note: Missing linked files cannot be packed. The blend file will still be saved without these libraries.")
     
     if oversized_files:
-        print(f"[SheepIt Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over 2GB):")
+        print(f"[SheepIt Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over size limit):")
         for of in oversized_files[:5]:  # Show first 5
             file_size_gb = of.stat().st_size / (1024 * 1024 * 1024) if of.exists() else 0
             print(f"[SheepIt Pack]     - {of.name if of.name else of} ({file_size_gb:.2f} GB)")
         if len(oversized_files) > 5:
             print(f"[SheepIt Pack]     ... and {len(oversized_files) - 5} more")
-        print(f"[SheepIt Pack]   Note: Blender cannot pack linked files over 2GB. These libraries will remain as external references.")
+        print(f"[SheepIt Pack]   Note: Blender cannot pack linked files over the project size limit. These libraries will remain as external references.")
         print(f"[SheepIt Pack]   To fix: Reduce the size of these files or split them into smaller files.")
     
     if returncode != 0:
@@ -982,7 +1001,8 @@ class IncrementalPacker:
                  progress_callback=None, cancel_check=None,
                  frame_start=None, frame_end=None, frame_step=None,
                  temp_blend_path: Optional[Path] = None,
-                 original_blend_path: Optional[Path] = None):
+                 original_blend_path: Optional[Path] = None,
+                 max_size_bytes: Optional[int] = None):
         self.workflow = workflow
         self.target_path = target_path
         self.enable_nla = enable_nla
@@ -993,6 +1013,7 @@ class IncrementalPacker:
         self.frame_step = frame_step
         self.temp_blend_path = temp_blend_path  # Temp file used as source (should be copied directly to root)
         self.original_blend_path = original_blend_path  # Original blend file path (for cache lookup)
+        self.max_size_bytes = max_size_bytes  # Project size limit in bytes (None = 2GB)
         
         # State tracking
         self.phase = 'INIT'
@@ -1422,7 +1443,7 @@ class IncrementalPacker:
                     print(f"[SheepIt Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
                     print(f"[SheepIt Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
-                        missing_files, oversized_files = pack_linked_in_blend(blend_to_fix)
+                        missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=self.max_size_bytes)
                         # Track oversized files for user reporting
                         if oversized_files:
                             self.oversized_files_all.extend(oversized_files)
@@ -1430,7 +1451,7 @@ class IncrementalPacker:
                         if missing_files:
                             issues.append(f"{len(missing_files)} missing")
                         if oversized_files:
-                            issues.append(f"{len(oversized_files)} over 2GB")
+                            issues.append(f"{len(oversized_files)} over size limit")
                         if issues:
                             print(f"[SheepIt Pack]   Completed pack_linked for: {blend_to_fix.name} (with {', '.join(issues)} linked files that couldn't be packed)")
                         else:
@@ -1727,7 +1748,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     if progress_callback:
                         progress_callback(progress_pct, f"Packing linked... ({i}/{len(to_remap)})")
                     print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    missing_files, oversized_files = pack_linked_in_blend(blend_to_fix)
+                    max_size_bytes = _get_project_size_limit_bytes()
+                    missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=max_size_bytes)
                     issues = []
                     if missing_files:
                         issues.append(f"{len(missing_files)} missing")
@@ -1948,6 +1970,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                         """Check if user wants to cancel."""
                         return not submit_settings.is_submitting
                     
+                    max_size_bytes = _get_project_size_limit_bytes(context)
                     self._packer = IncrementalPacker(
                         WorkflowMode.COPY_ONLY,
                         target_path=None,
@@ -1958,7 +1981,8 @@ class SHEEPIT_OT_pack_zip(Operator):
                         frame_end=self._frame_end,
                         frame_step=self._frame_step,
                         temp_blend_path=self._temp_blend_path,
-                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None
+                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None,
+                        max_size_bytes=max_size_bytes,
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -1985,14 +2009,14 @@ class SHEEPIT_OT_pack_zip(Operator):
                                 if len(self._packer.oversized_files_all) > 10:
                                     oversized_list += f"\n  ... and {len(self._packer.oversized_files_all) - 10} more"
                                 warning_msg = (
-                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed:\n"
+                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed:\n"
                                     f"{oversized_list}\n\n"
-                                    "Blender cannot pack linked files over 2GB. These files will remain as external references.\n"
+                                    "Blender cannot pack linked files over the project size limit. These files will remain as external references.\n"
                                     "To fix: Reduce the size of these files or split them into smaller files."
                                 )
                                 print(f"[SheepIt Pack] {warning_msg}")
                                 # Report as warning (non-blocking)
-                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed")
+                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
                             self._phase = 'APPLYING_FRAME_RANGE_TO_PACKED'
                             print(f"[SheepIt Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
@@ -2070,13 +2094,12 @@ class SHEEPIT_OT_pack_zip(Operator):
                                 file_count += 1
                     
                     total_size_gb = total_size / (1024 * 1024 * 1024)
-                    MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
-                    
                     print(f"[SheepIt Pack] Estimated packed directory size: {total_size_gb:.2f} GB ({file_count} files)")
-                    
-                    if total_size > MAX_FILE_SIZE:
+                    max_bytes = _get_project_size_limit_bytes(context)
+                    if max_bytes is not None and total_size > max_bytes:
+                        limit_gb = max_bytes / (1024 * 1024 * 1024)
                         error_msg = (
-                            f"Estimated packed size ({total_size_gb:.2f} GB) exceeds 2GB limit. Cannot create ZIP.\n\n"
+                            f"Estimated packed size ({total_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB). Cannot create ZIP.\n\n"
                             "To reduce file size, consider:\n"
                             "- Optimizing the scene (reduce geometry, simplify materials)\n"
                             "- Optimizing asset files (compress textures, reduce resolution)\n"
@@ -2196,13 +2219,12 @@ class SHEEPIT_OT_pack_zip(Operator):
                     if self._zip_path and self._zip_path.exists():
                         zip_size = self._zip_path.stat().st_size
                         zip_size_gb = zip_size / (1024 * 1024 * 1024)
-                        MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
-                        
                         print(f"[SheepIt Pack] Final ZIP size: {zip_size_gb:.2f} GB")
-                        
-                        if zip_size > MAX_FILE_SIZE:
+                        max_bytes = _get_project_size_limit_bytes(context)
+                        if max_bytes is not None and zip_size > max_bytes:
+                            limit_gb = max_bytes / (1024 * 1024 * 1024)
                             error_msg = (
-                                f"ZIP size ({zip_size_gb:.2f} GB) exceeds 2GB limit. Cannot submit.\n\n"
+                                f"ZIP size ({zip_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB). Cannot submit.\n\n"
                                 "To reduce file size, consider:\n"
                                 "- Optimizing the scene (reduce geometry, simplify materials)\n"
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"
@@ -2491,6 +2513,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                         """Check if user wants to cancel."""
                         return not submit_settings.is_submitting
                     
+                    max_size_bytes = _get_project_size_limit_bytes(context)
                     self._packer = IncrementalPacker(
                         WorkflowMode.PACK_AND_SAVE,
                         target_path=None,
@@ -2501,7 +2524,8 @@ class SHEEPIT_OT_pack_blend(Operator):
                         frame_end=self._frame_end,
                         frame_step=self._frame_step,
                         temp_blend_path=self._temp_blend_path,
-                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None
+                        original_blend_path=Path(self._original_filepath) if self._original_filepath else None,
+                        max_size_bytes=max_size_bytes,
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -2528,14 +2552,14 @@ class SHEEPIT_OT_pack_blend(Operator):
                                 if len(self._packer.oversized_files_all) > 10:
                                     oversized_list += f"\n  ... and {len(self._packer.oversized_files_all) - 10} more"
                                 warning_msg = (
-                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed:\n"
+                                    f"Warning: {len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed:\n"
                                     f"{oversized_list}\n\n"
-                                    "Blender cannot pack linked files over 2GB. These files will remain as external references.\n"
+                                    "Blender cannot pack linked files over the project size limit. These files will remain as external references.\n"
                                     "To fix: Reduce the size of these files or split them into smaller files."
                                 )
                                 print(f"[SheepIt Pack] {warning_msg}")
                                 # Report as warning (non-blocking)
-                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over 2GB could not be packed")
+                                self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
                             if not self._blend_path or not self._blend_path.exists():
                                 self._error = "Could not find target blend file for submission."
@@ -2600,13 +2624,12 @@ class SHEEPIT_OT_pack_blend(Operator):
                     if self._blend_path and self._blend_path.exists():
                         blend_size = self._blend_path.stat().st_size
                         blend_size_gb = blend_size / (1024 * 1024 * 1024)
-                        MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
-                        
-                        print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
-                        
-                        if blend_size > MAX_FILE_SIZE:
+                        max_bytes = _get_project_size_limit_bytes(context)
+                        if max_bytes is not None and blend_size > max_bytes:
+                            limit_gb = max_bytes / (1024 * 1024 * 1024)
+                            print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
                             error_msg = (
-                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds 2GB limit.\n\n"
+                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB).\n\n"
                                 "To reduce file size, consider:\n"
                                 "- Optimizing the scene (reduce geometry, simplify materials)\n"
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"
@@ -2818,6 +2841,7 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
         def _progress(pct, msg):
             submit_settings.submit_progress = 15.0 + (pct * 0.46)
             submit_settings.submit_status_message = msg
+        max_size_bytes = _get_project_size_limit_bytes(context)
         packer = IncrementalPacker(
             WorkflowMode.COPY_ONLY,
             target_path=None,
@@ -2829,6 +2853,7 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
             frame_step=frame_step,
             temp_blend_path=temp_blend_path,
             original_blend_path=Path(original_filepath) if original_filepath else None,
+            max_size_bytes=max_size_bytes,
         )
         try:
             while True:

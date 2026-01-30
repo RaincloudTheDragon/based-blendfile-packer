@@ -215,13 +215,13 @@ class SHEEPIT_OT_submit_current(Operator):
                     if self._temp_blend_path and self._temp_blend_path.exists():
                         blend_size = self._temp_blend_path.stat().st_size
                         blend_size_gb = blend_size / (1024 * 1024 * 1024)
-                        MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
-                        
-                        print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
-                        
-                        if blend_size > MAX_FILE_SIZE:
+                        from .pack_ops import _get_project_size_limit_bytes
+                        max_bytes = _get_project_size_limit_bytes(context)
+                        if max_bytes is not None and blend_size > max_bytes:
+                            limit_gb = max_bytes / (1024 * 1024 * 1024)
+                            print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
                             error_msg = (
-                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds 2GB limit.\n\n"
+                                f"Blend file size ({blend_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB).\n\n"
                                 "To reduce file size, consider:\n"
                                 "- Optimizing the scene (reduce geometry, simplify materials)\n"
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"

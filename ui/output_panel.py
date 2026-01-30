@@ -82,6 +82,8 @@ class SHEEPIT_PT_output_panel(Panel):
         box.label(text="Output Path:", icon='FILE_FOLDER')
         row = box.row()
         row.prop(submit_settings, "output_path", text="")
+        row = box.row()
+        row.prop(submit_settings, "project_size_limit_gb", text="Size limit (GB)")
 
 
 def register():
