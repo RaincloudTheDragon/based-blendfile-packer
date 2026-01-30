@@ -1,3 +1,13 @@
+## [v0.0.5] - 2026-01-30
+
+### Added
+- Project size limit (GB) in Output panel: per-pack int (0 = no limit, default 2), max 32-bit int
+
+### Fixed
+- USD/cache file paths remapped: `bpy.data.cache_files[].filepath` remapped to packed location; .usd/.usdc/.usda added to copy_map
+
+---
+
 ## [v0.0.4] - 2026-01-27
 
 ### Added
