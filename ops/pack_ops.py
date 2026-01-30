@@ -661,6 +661,15 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "                pc.filepath = new_path\n"
         "                caches_remapped += 1\n"
         "print(f'Remapped {{caches_remapped}} physics/point cache paths')\n"
+        "# Remap cache file paths (USD, etc.)\n"
+        "cache_files_remapped = 0\n"
+        "for cf in getattr(bpy.data, 'cache_files', []):\n"
+        "    if getattr(cf, 'filepath', None):\n"
+        "        new_path = do_remap_path(cf.filepath)\n"
+        "        if new_path is not None:\n"
+        "            cf.filepath = new_path\n"
+        "            cache_files_remapped += 1\n"
+        "print(f'Remapped {{cache_files_remapped}} cache file (USD) paths')\n"
         "# Save after remapping\n"
         "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
         "# Make all paths relative\n"
@@ -1241,7 +1250,7 @@ class IncrementalPacker:
                     shutil.copy2(asset_usage.abspath, target_asset_path)
                     self.copied_paths.add(asset_usage.abspath)
                     # Add to copy_map for remapping (blend files and image/texture files)
-                    if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov"):
+                    if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
                         self.copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
                     if (i < 5) or (i % 50 == 0):
                         print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
@@ -1652,7 +1661,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 shutil.copy2(asset_usage.abspath, target_asset_path)
                 copied_paths.add(asset_usage.abspath)
                 # Add to copy_map for remapping (blend files and image/texture files)
-                if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov"):
+                if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
                     copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
                 if asset_count <= 5 or asset_count % 50 == 0:  # Log first 5 and every 50th
                     print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
