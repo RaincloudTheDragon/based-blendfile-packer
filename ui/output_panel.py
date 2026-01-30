@@ -20,14 +20,8 @@ class SHEEPIT_PT_output_panel(Panel):
         layout = self.layout
         scene = context.scene
         submit_settings = scene.sheepit_submit
-        
-        # Initialize output path from preferences if empty (only check once per draw)
-        if not submit_settings.output_path:
-            from ..utils.compat import get_addon_prefs
-            prefs = get_addon_prefs()
-            if prefs and prefs.default_output_path:
-                submit_settings.output_path = prefs.default_output_path
-        
+        # Do not write to scene in draw(); operators fall back to prefs.default_output_path when output_path is empty.
+
         # Animation Setup Section
         box = layout.box()
         box.label(text="Animation Setup:", icon='ACTION')
