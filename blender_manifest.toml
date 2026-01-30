@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 id = "sheepit_project_submitter"
 name = "SheepIt Project Submitter"
-version = "0.0.5"
+version = "0.0.6"
 type = "add-on"
 author = "RaincloudTheDragon"
 maintainer = "RaincloudTheDragon"

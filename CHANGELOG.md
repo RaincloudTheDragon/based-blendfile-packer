@@ -1,3 +1,11 @@
+## [v0.0.6] - 2026-01-27
+
+### Fixed
+- Config import in `utils.compat`: use `from .. import config` (config is at addon root)
+- Output panel: no longer write to scene in draw(); Blender 5.0 forbids ID writes in draw; operators already fall back to prefs when output_path empty
+
+---
+
 ## [v0.0.5] - 2026-01-30
 
 ### Added
