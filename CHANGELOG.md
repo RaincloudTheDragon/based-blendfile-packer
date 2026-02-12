@@ -1,3 +1,12 @@
+## [v0.0.7] - 2026-02-12
+
+### Fixed
+- Pack: enable autopack before pack_all; force-load images and run pack_all twice; pack remaining images so textures are embedded (fixes "Failed to create GPU texture from Blender image" when rendering headless).
+- Remap: print actual paths in warnings (not placeholders); normalized path lookup and reverse copy_map so library blend image paths resolve.
+- pack_linked: catch PermissionError on library path checks so inaccessible (e.g. NAS) libs don’t abort; remove missing/inaccessible library refs from blend before save.
+
+---
+
 ## [v0.0.6] - 2026-01-27
 
 ### Fixed
