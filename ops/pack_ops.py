@@ -2378,7 +2378,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, f"ZIP file saved to: {self._output_path}")
+                    self.report({'INFO'}, self._message if self._message else f"File saved to: {self._output_path}")
                     return {'FINISHED'}
                 
             except Exception as e:
@@ -2777,7 +2777,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, f"ZIP file saved to: {self._output_path}")
+                    self.report({'INFO'}, self._message if self._message else f"File saved to: {self._output_path}")
                     return {'FINISHED'}
                 
             except Exception as e:
