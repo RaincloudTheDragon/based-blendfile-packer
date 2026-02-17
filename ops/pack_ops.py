@@ -115,6 +115,14 @@ def compute_target_relpath(abs_path: Path, base_root: Path) -> Path:
         return Path(label) / Path(rel_after_anchor)
 
 
+def _norm_copy_map_key(path) -> str:
+    """Normalize path for copy_map key; must match remap script norm_key."""
+    s = str(Path(path).resolve())
+    if os.name == "nt":
+        return s.lower().replace("\\", "/")
+    return s
+
+
 def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list, 
                       frame_start: Optional[int] = None, frame_end: Optional[int] = None, 
                       frame_step: Optional[int] = None,
@@ -205,9 +213,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
 
         def _add_cache_dir_to_map(sdir: Path, ddir: Path):
             if copy_map_out is not None:
-                copy_map_out[str(Path(sdir).resolve())] = str(ddir.resolve())
-                if os.name == "nt" and str(sdir) != str(Path(sdir).resolve()):
-                    copy_map_out[str(sdir)] = str(ddir.resolve())
+                copy_map_out[_norm_copy_map_key(sdir)] = str(ddir.resolve())
 
         for src_dir, dst_dir in candidates:
             if os.name == "nt":
@@ -1159,17 +1165,19 @@ class IncrementalPacker:
             if self.progress_callback:
                 self.progress_callback(10.0, "Collecting file paths...")
             self.all_filepaths = []
-            self.all_filepaths.extend(au.library_abspath(lib) for lib in self.asset_usages.keys())
+            self.all_filepaths.extend(au.library_abspath(lib).resolve() for lib in self.asset_usages.keys())
             self.all_filepaths.extend(
-                asset_usage.abspath
+                asset_usage.abspath.resolve()
                 for asset_usages in self.asset_usages.values()
                 for asset_usage in asset_usages
             )
             # Exclude temp file from common root calculation (it's just a source, not part of the project)
             if self.temp_blend_path:
                 temp_path_resolved = self.temp_blend_path.resolve()
-                self.all_filepaths = [p for p in self.all_filepaths if p.resolve() != temp_path_resolved]
+                self.all_filepaths = [p for p in self.all_filepaths if p != temp_path_resolved]
                 print(f"[SheepIt Pack]   Excluded temp file from common root calculation")
+            # Use resolved paths only so common_root is deterministic (no A:\ vs UNC mix)
+            self.all_filepaths = [Path(p).resolve() for p in self.all_filepaths]
             print(f"[SheepIt Pack] Collected {len(self.all_filepaths)} total file paths")
             self.phase = 'FIND_COMMON_ROOT'
             return ('FIND_COMMON_ROOT', False)
@@ -1223,14 +1231,15 @@ class IncrementalPacker:
                     print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
                 target_path_file = self.target_path / current_relpath
             
-            if current_blend_abspath not in self.copied_paths:
+            current_blend_resolved = current_blend_abspath.resolve()
+            if current_blend_resolved not in self.copied_paths:
                 print(f"[SheepIt Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
                 try:
                     target_path_file.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(current_blend_abspath, target_path_file)
-                    self.copied_paths.add(current_blend_abspath)
+                    self.copied_paths.add(current_blend_resolved)
                     if current_blend_abspath.suffix.lower() == ".blend":
-                        self.copy_map[str(current_blend_abspath.resolve())] = str(target_path_file.resolve())
+                        self.copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
                     self.top_level_target_blend = target_path_file.resolve()
                     print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
                     # Copy caches - use original blend path for cache lookup if temp file
@@ -1257,13 +1266,14 @@ class IncrementalPacker:
                     print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
                     self.missing_on_copy.append(current_blend_abspath)
             
-            # Prepare asset copy list
+            # Prepare asset copy list (dedupe by resolved path so each file copied once)
             total_assets = sum(len(links) for links in self.asset_usages.values())
             print(f"[SheepIt Pack] Preparing to copy {total_assets} asset files...")
-            
+            seen_resolved = set()
             for lib, links_to in self.asset_usages.items():
                 for asset_usage in links_to:
-                    if asset_usage.abspath in self.copied_paths:
+                    resolved = asset_usage.abspath.resolve()
+                    if resolved in self.copied_paths or resolved in seen_resolved:
                         continue
                     # Skip cache directories: already copied in copy_blend_caches from blend dir;
                     # including them here would try UNC path and fail with PermissionError.
@@ -1272,15 +1282,11 @@ class IncrementalPacker:
                         len(asset_usage.abspath.parts) >= 2 and asset_usage.abspath.parts[-2] == "bakes"
                     ):
                         continue
+                    seen_resolved.add(resolved)
                     try:
-                        # Try to get relative path to common root
-                        asset_relpath = asset_usage.abspath.relative_to(self.common_root)
-                        # Use relative path as-is (even if it's just a filename)
-                        # This preserves the original relative structure
+                        asset_relpath = resolved.relative_to(self.common_root)
                     except ValueError:
-                        # Paths are not relative to common root (different drive/UNC), 
-                        # use compute_target_relpath to create DRIVE_C/UNC structure
-                        asset_relpath = compute_target_relpath(asset_usage.abspath, self.common_root)
+                        asset_relpath = compute_target_relpath(resolved, self.common_root)
                     self.assets_to_copy.append((asset_usage, asset_relpath))
             
             self.assets_copied = 0
@@ -1294,7 +1300,9 @@ class IncrementalPacker:
             
             for i in range(self.assets_copied, batch_end):
                 asset_usage, asset_relpath = self.assets_to_copy[i]
-                
+                resolved = asset_usage.abspath.resolve()
+                if resolved in self.copied_paths:
+                    continue
                 if not asset_usage.abspath.exists():
                     print(f"[SheepIt Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
                     self.missing_on_copy.append(asset_usage.abspath)
@@ -1305,10 +1313,10 @@ class IncrementalPacker:
                     target_asset_path.parent.mkdir(parents=True, exist_ok=True)
                     file_size = asset_usage.abspath.stat().st_size
                     shutil.copy2(asset_usage.abspath, target_asset_path)
-                    self.copied_paths.add(asset_usage.abspath)
+                    self.copied_paths.add(resolved)
                     # Add to copy_map for remapping (blend files and image/texture files)
                     if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
-                        self.copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
+                        self.copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
                     if (i < 5) or (i % 50 == 0):
                         print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
                 except Exception as e:
@@ -1660,15 +1668,16 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
     
     top_level_target_blend = None
-    if current_blend_abspath not in copied_paths:
+    current_blend_resolved = current_blend_abspath.resolve()
+    if current_blend_resolved not in copied_paths:
         target_path_file = target_path / current_relpath
         print(f"[SheepIt Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
         try:
             target_path_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(current_blend_abspath, target_path_file)
-            copied_paths.add(current_blend_abspath)
+            copied_paths.add(current_blend_resolved)
             if current_blend_abspath.suffix.lower() == ".blend":
-                copy_map[str(current_blend_abspath.resolve())] = str(target_path_file.resolve())
+                copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
             top_level_target_blend = target_path_file.resolve()
             print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
             # Copy caches
@@ -1686,11 +1695,13 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     total_assets = sum(len(links) for links in asset_usages.values())
     print(f"[SheepIt Pack] Copying {total_assets} asset files...")
     asset_count = 0
+    seen_resolved = set()
     for lib, links_to in asset_usages.items():
         for asset_usage in links_to:
-            if asset_usage.abspath in copied_paths:
+            resolved = asset_usage.abspath.resolve()
+            if resolved in copied_paths or resolved in seen_resolved:
                 continue
-            
+            seen_resolved.add(resolved)
             asset_count += 1
             # Update progress every 10 files or every 1% of total
             if asset_count % 10 == 0 or (total_assets > 0 and asset_count % max(1, total_assets // 100) == 0):
@@ -1702,9 +1713,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 raise InterruptedError("Packing cancelled by user")
             
             try:
-                asset_relpath = asset_usage.abspath.relative_to(common_root)
+                asset_relpath = resolved.relative_to(common_root)
             except ValueError:
-                asset_relpath = compute_target_relpath(asset_usage.abspath, common_root)
+                asset_relpath = compute_target_relpath(resolved, common_root)
             
             if not asset_usage.abspath.exists():
                 print(f"[SheepIt Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
@@ -1716,10 +1727,10 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 target_asset_path.parent.mkdir(parents=True, exist_ok=True)
                 file_size = asset_usage.abspath.stat().st_size
                 shutil.copy2(asset_usage.abspath, target_asset_path)
-                copied_paths.add(asset_usage.abspath)
+                copied_paths.add(resolved)
                 # Add to copy_map for remapping (blend files and image/texture files)
                 if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
-                    copy_map[str(asset_usage.abspath.resolve())] = str(target_asset_path.resolve())
+                    copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
                 if asset_count <= 5 or asset_count % 50 == 0:  # Log first 5 and every 50th
                     print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
             except Exception as e:
