@@ -1,9 +1,18 @@
+## [v0.0.8] - 2026-03-16
+
+### Fixed
+- Texture copy: dedupe assets by resolved path and use normalized copy_map keys to prevent mixed UNC/drive paths causing missing textures.
+- Pack as Blend: report "Blend file saved" instead of "ZIP file saved".
+- Pack linked: remove missing libraries before pack_libraries() to prevent failures when external blends are unavailable.
+
+---
+
 ## [v0.0.7] - 2026-02-12
 
 ### Fixed
 - Pack: enable autopack before pack_all; force-load images and run pack_all twice; pack remaining images so textures are embedded (fixes "Failed to create GPU texture from Blender image" when rendering headless).
 - Remap: print actual paths in warnings (not placeholders); normalized path lookup and reverse copy_map so library blend image paths resolve.
-- pack_linked: catch PermissionError on library path checks so inaccessible (e.g. NAS) libs don’t abort; remove missing/inaccessible library refs from blend before save.
+- pack_linked: catch PermissionError on library path checks so inaccessible (e.g. NAS) libs don't abort; remove missing/inaccessible library refs from blend before save.
 
 ---
 
