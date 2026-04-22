@@ -5,3 +5,7 @@ __pycache__
 *.pyc
 *~
 *.blend1
+
+#IDE
+.vscode/
+.specstory/
