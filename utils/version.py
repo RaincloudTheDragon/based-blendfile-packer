@@ -103,6 +103,16 @@ def is_version_4_5():
 
 
 def is_version_5_0():
+    """Check if running Blender 5.0.x (before 5.1)."""
+    return is_version_at_least(5, 0, 0) and is_version_less_than(5, 1, 0)
+
+
+def is_version_5_1():
+    """Check if running Blender 5.1 or later."""
+    return is_version_at_least(5, 1, 0)
+
+
+def is_version_5_0_plus():
     """Check if running Blender 5.0 or later."""
     return is_version_at_least(5, 0, 0)
 
@@ -133,7 +143,9 @@ def get_version_category():
         elif minor >= 5:
             return '4.5'
     elif major >= 5:
-        return '5.0+'
+        if minor == 0:
+            return '5.0'
+        return '5.1+'
     
     # Fallback
     return f"{major}.{minor}"

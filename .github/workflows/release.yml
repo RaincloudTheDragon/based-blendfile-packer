@@ -47,13 +47,19 @@ jobs:
           done
 
           # Copy packages
-          for dir in ops ui utils batter; do
+          for dir in ops ui utils vendor; do
             if [ -d "$dir" ]; then
               cp -r "$dir" "$ADDON_DIR"/
             else
               echo "Skipping missing directory: $dir"
             fi
           done
+
+          # Copy BAT v2 wheel (Blender 5.1+)
+          if [ -d wheels ]; then
+            mkdir -p "$ADDON_DIR/wheels"
+            cp wheels/*.whl "$ADDON_DIR/wheels/" 2>/dev/null || echo "No wheels to copy"
+          fi
 
           # Create the zip from the temporary directory
           cd addon_files

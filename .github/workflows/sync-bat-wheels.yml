@@ -1,0 +1,121 @@
+name: Sync BAT wheels
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - requirements/bat-v1/requirements.txt
+      - requirements/bat-v2/requirements.txt
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Read pinned BAT versions
+        id: pins
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          def read_pin(req_path: Path) -> str:
+              for line in req_path.read_text(encoding="utf-8").splitlines():
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      return line.split("==", 1)[1].strip()
+              raise SystemExit(f"No pin found in {req_path}")
+
+          root = Path(".")
+          v1 = read_pin(root / "requirements/bat-v1/requirements.txt")
+          v2 = read_pin(root / "requirements/bat-v2/requirements.txt")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"v1={v1}\n")
+              fh.write(f"v2={v2}\n")
+          PY
+
+      - name: Download BAT v2 wheel
+        run: |
+          mkdir -p wheels
+          pip download "blender-asset-tracer==${{ steps.pins.outputs.v2 }}" \
+            -d wheels --no-deps --only-binary=:all:
+
+      - name: Refresh vendored BAT v1
+        run: |
+          rm -rf vendor/bat_v1/blender_asset_tracer
+          mkdir -p vendor/bat_v1
+          pip download "blender-asset-tracer==${{ steps.pins.outputs.v1 }}" \
+            -d /tmp/bat-v1 --no-deps --only-binary=:all:
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          whl = next(Path("/tmp/bat-v1").glob("blender_asset_tracer-*.whl"))
+          out = Path("vendor/bat_v1")
+          with zipfile.ZipFile(whl) as zf:
+              for name in zf.namelist():
+                  if not name.startswith("blender_asset_tracer/"):
+                      continue
+                  target = out / name
+                  if name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(zf.read(name))
+          PY
+
+      - name: Update blender_manifest.toml wheel entry
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          manifest = Path("blender_manifest.toml")
+          text = manifest.read_text(encoding="utf-8")
+          wheel_name = next(Path("wheels").glob("blender_asset_tracer-*.whl")).name
+          wheel_line = f'  "./wheels/{wheel_name}",'
+
+          if "wheels = [" in text:
+              text = re.sub(
+                  r"wheels = \[[^\]]*\]",
+                  f"wheels = [\n{wheel_line}\n]",
+                  text,
+                  count=1,
+                  flags=re.DOTALL,
+              )
+          else:
+              insert = (
+                  "\n# Blender Asset Tracer v2 wheel (Blender 5.1+). "
+                  "BAT v1 is vendored under vendor/bat_v1/.\n"
+                  f"wheels = [\n{wheel_line}\n]\n"
+              )
+              text = text.rstrip() + insert
+
+          manifest.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Commit sync changes
+        run: |
+          if git diff --quiet; then
+            echo "BAT dependencies already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wheels vendor/bat_v1 blender_manifest.toml
+          git commit -m "Sync BAT wheels and vendored v1 from requirements pins"
+
+      - name: Push changes
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: git push

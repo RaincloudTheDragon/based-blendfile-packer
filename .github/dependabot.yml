@@ -1,0 +1,26 @@
+# Track BAT releases and GitHub Actions updates.
+# Wheel/vendor sync is handled by .github/workflows/sync-bat-wheels.yml.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /requirements/bat-v1
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - bat-v1
+
+  - package-ecosystem: pip
+    directory: /requirements/bat-v2
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - bat-v2
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies

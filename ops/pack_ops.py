@@ -13,80 +13,7 @@ import bpy
 from bpy.types import Operator
 from bpy.props import EnumProperty
 
-# Import batter asset usage module
-# Use importlib to avoid sys.path manipulation and top-level module policy violations
-import importlib.util
-import sys
-from pathlib import Path as PathLib
-
-# Get the addon directory
-_my_dir = PathLib(__file__).resolve().parent.parent
-
-# Cache for the loaded module
-_asset_usage_module = None
-
-
-def _get_asset_usage_module():
-    """Get the batter.asset_usage module without violating Blender extension policies.
-    
-    This function loads the module using importlib without modifying sys.path,
-    avoiding "Policy violation with top level module" and "Policy violation with sys.path" errors.
-    
-    The module is registered as a private submodule of the ops package to avoid policy violations.
-    """
-    global _asset_usage_module
-    
-    if _asset_usage_module is not None:
-        return _asset_usage_module
-    
-    # Determine the proper module name as a submodule of the current package
-    # This avoids "top level module" policy violations
-    if __package__:
-        # Register as a private submodule of the ops package
-        # e.g., "based_blendfile_packer.ops._asset_usage" or "bl_ext.vscode_development.based_blendfile_packer.ops._asset_usage"
-        module_name = f"{__package__}._asset_usage"
-    else:
-        # Fallback: use a name based on the file location
-        # This shouldn't happen in normal operation, but provides a fallback
-        module_name = "based_blendfile_packer.ops._asset_usage"
-    
-    try:
-        spec = importlib.util.spec_from_file_location(
-            module_name,
-            _my_dir / "batter" / "asset_usage.py"
-        )
-        if spec and spec.loader:
-            _asset_usage_module = importlib.util.module_from_spec(spec)
-            # Set module metadata before execution so dataclasses can resolve __module__ correctly
-            _asset_usage_module.__name__ = module_name
-            _asset_usage_module.__file__ = str(_my_dir / "batter" / "asset_usage.py")
-            # Set package to parent package (ops)
-            if __package__:
-                _asset_usage_module.__package__ = __package__
-            else:
-                _asset_usage_module.__package__ = "based_blendfile_packer.ops"
-            
-            # Register in sys.modules BEFORE execution so classes can resolve their __module__ attribute
-            # Registering as a submodule (with dots) avoids "top level module" policy violations
-            sys.modules[module_name] = _asset_usage_module
-            
-            # Now execute the module
-            spec.loader.exec_module(_asset_usage_module)
-            return _asset_usage_module
-    except Exception as e:
-        # Clean up on error
-        if module_name in sys.modules:
-            del sys.modules[module_name]
-        raise ImportError(f"Could not import batter.asset_usage module using importlib: {e}")
-    
-    raise ImportError("Could not import batter.asset_usage module using importlib")
-
-
-# Load the module at import time
-try:
-    au = _get_asset_usage_module()
-except ImportError as e:
-    raise ImportError(f"Could not import batter.asset_usage module: {e}")
+from ..utils import bat_asset_usage as au
 
 
 class WorkflowMode:
@@ -2025,21 +1952,16 @@ class BBP_OT_pack_zip(Operator):
                     
                     # Temporarily override library_abspath to use temp file instead of opening it
                     # This avoids invalidating the operator instance
-                    au = _get_asset_usage_module()
                     import functools
-                    
-                    # Store original function
+
                     self._original_library_abspath = au.library_abspath
-                    
-                    # Create override function
                     temp_file_path = self._temp_blend_path.resolve()
+
                     def override_library_abspath(lib):
                         if lib is None:
                             return temp_file_path
-                        else:
-                            return self._original_library_abspath(lib)
-                    
-                    # Replace the function (clear cache first)
+                        return self._original_library_abspath(lib)
+
                     au.library_abspath.cache_clear()
                     au.library_abspath = override_library_abspath
                     # Re-apply lru_cache decorator behavior by wrapping
@@ -2162,7 +2084,6 @@ class BBP_OT_pack_zip(Operator):
                     
                     # Restore original library_abspath function
                     if hasattr(self, '_original_library_abspath'):
-                        au = _get_asset_usage_module()
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
                         print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
@@ -2414,7 +2335,6 @@ class BBP_OT_pack_zip(Operator):
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
             try:
-                au = _get_asset_usage_module()
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
                 print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
@@ -2568,21 +2488,16 @@ class BBP_OT_pack_blend(Operator):
                     
                     # Temporarily override library_abspath to use temp file instead of opening it
                     # This avoids invalidating the operator instance
-                    au = _get_asset_usage_module()
                     import functools
-                    
-                    # Store original function
+
                     self._original_library_abspath = au.library_abspath
-                    
-                    # Create override function
                     temp_file_path = self._temp_blend_path.resolve()
+
                     def override_library_abspath(lib):
                         if lib is None:
                             return temp_file_path
-                        else:
-                            return self._original_library_abspath(lib)
-                    
-                    # Replace the function (clear cache first)
+                        return self._original_library_abspath(lib)
+
                     au.library_abspath.cache_clear()
                     au.library_abspath = override_library_abspath
                     # Re-apply lru_cache decorator behavior by wrapping
@@ -2701,7 +2616,6 @@ class BBP_OT_pack_blend(Operator):
                     
                     # Restore original library_abspath function
                     if hasattr(self, '_original_library_abspath'):
-                        au = _get_asset_usage_module()
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
                         print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
@@ -2813,7 +2727,6 @@ class BBP_OT_pack_blend(Operator):
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
             try:
-                au = _get_asset_usage_module()
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
                 print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
@@ -2923,7 +2836,6 @@ class BBP_OT_pack_zip_sync(Operator):
             pack_settings.is_packing = False
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        au = _get_asset_usage_module()
         import functools
         _orig_lib_abspath = au.library_abspath
         temp_file_path = temp_blend_path.resolve()

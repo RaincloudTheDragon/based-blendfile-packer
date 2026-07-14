@@ -16,3 +16,8 @@ tags = ["render", "pack", "utility", "assets"]
 
 # Python modules to load for this add-on
 modules = ["based_blendfile_packer"]
+
+# Blender Asset Tracer v2 wheel (Blender 5.1+). BAT v1 is vendored under vendor/bat_v1/.
+wheels = [
+  "./wheels/blender_asset_tracer-2.1.0-py3-none-any.whl",
+]

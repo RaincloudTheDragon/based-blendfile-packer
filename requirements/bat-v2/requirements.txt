@@ -1,0 +1,3 @@
+# BAT v2 — bundled wheel for Blender 5.1+ (Requires-Python 3.13).
+# Dependabot bumps this pin; .github/workflows/sync-bat-wheels.yml refreshes wheels/.
+blender-asset-tracer==2.1.0
