@@ -53,7 +53,6 @@ class BBP_PT_output_panel(Panel):
         col = layout.column()
         col.scale_y = 1.5
 
-        col.operator("bbp.pack_current", text="Pack Current Blend", icon='EXPORT')
         col.operator("bbp.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
         row = layout.row()
         row.prop(pack_settings, "exclude_video_from_zip", text="Exclude video/audio from ZIP")

@@ -6,7 +6,7 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 | Automatic Asset Packing | Frame Range Control | Multiple Packing Methods |
 |--|--|--|
-| Automatically packs all linked blend files, textures, images, and external assets into your project. Supports both ZIP and packed blend file workflows. | Configure custom frame ranges directly in Blender without saving your file. Frame ranges are automatically applied to packed files. | Pack as current blend file, packed ZIP archive, or packed blend file. Choose the method that best fits your project. |
+| Automatically packs all linked blend files, textures, images, and external assets into your project. Supports both ZIP and packed blend file workflows. | Configure custom frame ranges directly in Blender without saving your file. Frame ranges are automatically applied to packed files. | Pack as ZIP archive or packed blend file. Choose the method that best fits your project. |
 
 | Cache Management | Size Validation | Progress Tracking |
 |--|--|--|
@@ -33,7 +33,6 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 1. **Set Frame Range**: In the Output properties panel, configure your frame range (full range or custom)
 2. **Pack Project**: Choose your packing method:
-   - **Pack Current Blend**: Saves the current blend file with frame range applied
    - **Pack as ZIP**: Packs all assets and creates a ZIP archive (recommended for scenes with caches)
    - **Pack as Blend**: Packs all assets directly into the blend file
 3. **Select Output Location**: A file browser will open to select where to save the packed file
