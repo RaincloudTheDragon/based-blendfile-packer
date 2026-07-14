@@ -68,7 +68,7 @@ jobs:
       - name: Upload Release Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.get_version.outputs.zip_name }}
           tag_name: ${{ inputs.release_tag }}
