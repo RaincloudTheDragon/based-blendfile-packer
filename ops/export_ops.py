@@ -1,5 +1,5 @@
 """
-Submission operations for SheepIt render farm.
+Export operations for BasedBlendfilePacker.
 """
 
 import os
@@ -40,54 +40,54 @@ print(f'Applied frame range {frame_start}-{frame_end} (step {frame_step}) to all
     ], capture_output=True, text=True, check=False)
     
     if result.returncode != 0:
-        print(f"[SheepIt Submit] WARNING: Failed to apply frame range to {blend_path.name}")
+        print(f"[BBP Export] WARNING: Failed to apply frame range to {blend_path.name}")
         if result.stderr:
-            print(f"[SheepIt Submit]   Error: {result.stderr[:200]}")
+            print(f"[BBP Export]   Error: {result.stderr[:200]}")
     else:
-        print(f"[SheepIt Submit] Applied frame range {frame_start}-{frame_end} (step {frame_step}) to {blend_path.name}")
+        print(f"[BBP Export] Applied frame range {frame_start}-{frame_end} (step {frame_step}) to {blend_path.name}")
 
 
-def save_current_blend_with_frame_range(submit_settings, temp_dir: Optional[Path] = None) -> Tuple[Path, int, int, int]:
+def save_current_blend_with_frame_range(pack_settings, temp_dir: Optional[Path] = None) -> Tuple[Path, int, int, int]:
     """
-    Save current blend state to a temporary file and apply frame range from submit_settings.
+    Save current blend state to a temporary file and apply frame range from pack_settings.
     
     Args:
-        submit_settings: Submit settings containing frame range configuration
+        pack_settings: Submit settings containing frame range configuration
         temp_dir: Optional temporary directory (if None, creates a new one)
     
     Returns:
         Tuple of (temp_blend_path, frame_start, frame_end, frame_step)
     """
-    # Determine frame range from submit_settings
-    if submit_settings.frame_range_mode == 'FULL':
+    # Determine frame range from pack_settings
+    if pack_settings.frame_range_mode == 'FULL':
         frame_start = bpy.context.scene.frame_start
         frame_end = bpy.context.scene.frame_end
         frame_step = bpy.context.scene.frame_step
     else:
-        frame_start = submit_settings.frame_start
-        frame_end = submit_settings.frame_end
-        frame_step = submit_settings.frame_step
+        frame_start = pack_settings.frame_start
+        frame_end = pack_settings.frame_end
+        frame_step = pack_settings.frame_step
     
     # Create temp directory if not provided
     if temp_dir is None:
-        temp_dir = Path(tempfile.mkdtemp(prefix="sheepit_submit_"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="bbp_export_"))
     
     # Generate temp blend filename
     blend_name = bpy.data.filepath if bpy.data.filepath else "untitled"
     blend_name = Path(blend_name).stem if blend_name else "untitled"
     temp_blend = temp_dir / f"{blend_name}.blend"
     
-    print(f"[SheepIt Submit] Saving current blend state to: {temp_blend}")
-    print(f"[SheepIt Submit] Frame range: {frame_start} - {frame_end} (step: {frame_step})")
+    print(f"[BBP Export] Saving current blend state to: {temp_blend}")
+    print(f"[BBP Export] Frame range: {frame_start} - {frame_end} (step: {frame_step})")
     
     # Save current blend state
     try:
         temp_dir.mkdir(parents=True, exist_ok=True)
         bpy.ops.wm.save_as_mainfile(filepath=str(temp_blend), copy=True, compress=True)
-        print(f"[SheepIt Submit] Saved current blend state to temp file")
+        print(f"[BBP Export] Saved current blend state to temp file")
     except Exception as e:
         error_msg = f"Failed to save current blend state: {type(e).__name__}: {str(e)}"
-        print(f"[SheepIt Submit] ERROR: {error_msg}")
+        print(f"[BBP Export] ERROR: {error_msg}")
         raise RuntimeError(error_msg) from e
     
     # Apply frame range to the saved file
@@ -96,30 +96,30 @@ def save_current_blend_with_frame_range(submit_settings, temp_dir: Optional[Path
     return temp_blend, frame_start, frame_end, frame_step
 
 
-class SHEEPIT_OT_submit_current(Operator):
+class BBP_OT_pack_current(Operator):
     """Pack current blend file to output location without packing assets."""
-    bl_idname = "sheepit.submit_current"
+    bl_idname = "bbp.pack_current"
     bl_label = "Pack Current Blend"
     bl_description = "Save the current blend file with frame range applied to the specified output location"
     bl_options = {'REGISTER', 'UNDO'}
     
     def invoke(self, context, event):
         """Start the packing operation."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Check if already packing
-        if submit_settings.is_submitting:
+        if pack_settings.is_packing:
             self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
         # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
+        output_dir = pack_settings.output_path
         if not output_dir:
             from ..utils.compat import get_addon_prefs
             prefs = get_addon_prefs()
             if prefs and prefs.default_output_path:
                 output_dir = prefs.default_output_path
-                submit_settings.output_path = output_dir
+                pack_settings.output_path = output_dir
         
         if not output_dir:
             self.report({'ERROR'}, "Please specify an output path in the panel below.")
@@ -134,9 +134,9 @@ class SHEEPIT_OT_submit_current(Operator):
         output_file = Path(output_dir) / f"{blend_name}.blend"
         
         # Initialize progress properties
-        submit_settings.is_submitting = True
-        submit_settings.submit_progress = 0.0
-        submit_settings.submit_status_message = "Initializing..."
+        pack_settings.is_packing = True
+        pack_settings.pack_progress = 0.0
+        pack_settings.pack_status_message = "Initializing..."
         
         # Initialize phase tracking
         self._phase = 'INIT'
@@ -165,7 +165,7 @@ class SHEEPIT_OT_submit_current(Operator):
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Handle ESC key to cancel
         if event.type == 'ESC':
@@ -177,20 +177,20 @@ class SHEEPIT_OT_submit_current(Operator):
         if event.type == 'TIMER':
             try:
                 if self._phase == 'INIT':
-                    submit_settings.submit_progress = 0.0
-                    submit_settings.submit_status_message = "Initializing..."
+                    pack_settings.pack_progress = 0.0
+                    pack_settings.pack_status_message = "Initializing..."
                     self._phase = 'SAVING_BLEND'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_BLEND':
-                    submit_settings.submit_progress = 10.0
-                    submit_settings.submit_status_message = "Saving current blend state..."
+                    pack_settings.pack_progress = 10.0
+                    pack_settings.pack_status_message = "Saving current blend state..."
                     
                     # Save current blend state to temp file with frame range applied
                     try:
-                        self._temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+                        self._temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(pack_settings)
                         self._temp_dir = self._temp_blend_path.parent
-                        print(f"[SheepIt Submit] Using temp blend file: {self._temp_blend_path}")
+                        print(f"[BBP Export] Using temp blend file: {self._temp_blend_path}")
                     except Exception as e:
                         self._error = f"Failed to save current blend state: {str(e)}"
                         self._cleanup(context, cancelled=True)
@@ -201,15 +201,15 @@ class SHEEPIT_OT_submit_current(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE':
-                    submit_settings.submit_progress = 20.0
-                    submit_settings.submit_status_message = "Frame range applied."
+                    pack_settings.pack_progress = 20.0
+                    pack_settings.pack_status_message = "Frame range applied."
                     # Frame range is already applied in save_current_blend_with_frame_range
                     self._phase = 'VALIDATING_FILE_SIZE'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_FILE_SIZE':
-                    submit_settings.submit_progress = 30.0
-                    submit_settings.submit_status_message = "Validating file size..."
+                    pack_settings.pack_progress = 30.0
+                    pack_settings.pack_status_message = "Validating file size..."
                     
                     # Check blend file size
                     if self._temp_blend_path and self._temp_blend_path.exists():
@@ -219,7 +219,7 @@ class SHEEPIT_OT_submit_current(Operator):
                         max_bytes = _get_project_size_limit_bytes(context)
                         if max_bytes is not None and blend_size > max_bytes:
                             limit_gb = max_bytes / (1024 * 1024 * 1024)
-                            print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
+                            print(f"[BBP Pack] Blend file size: {blend_size_gb:.2f} GB")
                             error_msg = (
                                 f"Blend file size ({blend_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB).\n\n"
                                 "To reduce file size, consider:\n"
@@ -227,7 +227,7 @@ class SHEEPIT_OT_submit_current(Operator):
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"
                                 "- Splitting the frame range (render in smaller chunks)"
                             )
-                            print(f"[SheepIt Pack] ERROR: {error_msg}")
+                            print(f"[BBP Pack] ERROR: {error_msg}")
                             self._error = error_msg
                             self._cleanup(context, cancelled=True)
                             self.report({'ERROR'}, self._error)
@@ -237,8 +237,8 @@ class SHEEPIT_OT_submit_current(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_FILE':
-                    submit_settings.submit_progress = 50.0
-                    submit_settings.submit_status_message = "Saving file to output location..."
+                    pack_settings.pack_progress = 50.0
+                    pack_settings.pack_status_message = "Saving file to output location..."
                     
                     try:
                         # Ensure output directory exists
@@ -248,12 +248,12 @@ class SHEEPIT_OT_submit_current(Operator):
                         import shutil
                         shutil.copy2(self._temp_blend_path, self._output_path)
                         
-                        print(f"[SheepIt Pack] Saved blend file to: {self._output_path}")
+                        print(f"[BBP Pack] Saved blend file to: {self._output_path}")
                         self._success = True
                         self._message = f"Blend file saved to: {self._output_path}"
                         
-                        submit_settings.submit_progress = 90.0
-                        submit_settings.submit_status_message = "File saved successfully!"
+                        pack_settings.pack_progress = 90.0
+                        pack_settings.pack_status_message = "File saved successfully!"
                         self._phase = 'CLEANUP'
                     except Exception as e:
                         self._error = f"Failed to save file: {str(e)}"
@@ -264,8 +264,8 @@ class SHEEPIT_OT_submit_current(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CLEANUP':
-                    submit_settings.submit_progress = 98.0
-                    submit_settings.submit_status_message = "Cleaning up..."
+                    pack_settings.pack_progress = 98.0
+                    pack_settings.pack_status_message = "Cleaning up..."
                     
                     # Clean up temp file on success
                     if self._temp_blend_path and self._temp_blend_path.exists():
@@ -276,16 +276,16 @@ class SHEEPIT_OT_submit_current(Operator):
                                     self._temp_dir.rmdir()
                                 except Exception:
                                     pass  # Directory may not be empty
-                            print(f"[SheepIt Submit] Cleaned up temp file: {self._temp_blend_path}")
+                            print(f"[BBP Export] Cleaned up temp file: {self._temp_blend_path}")
                         except Exception as e:
-                            print(f"[SheepIt Submit] WARNING: Could not clean up temp file: {e}")
+                            print(f"[BBP Export] WARNING: Could not clean up temp file: {e}")
                     
                     self._phase = 'COMPLETE'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'COMPLETE':
-                    submit_settings.submit_progress = 100.0
-                    submit_settings.submit_status_message = "Packing complete!"
+                    pack_settings.pack_progress = 100.0
+                    pack_settings.pack_status_message = "Packing complete!"
                     
                     # Small delay to show completion
                     import time
@@ -307,19 +307,19 @@ class SHEEPIT_OT_submit_current(Operator):
     
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
             context.window_manager.event_timer_remove(self._timer)
         
         # Reset progress properties
-        submit_settings.is_submitting = False
-        submit_settings.submit_progress = 0.0
+        pack_settings.is_packing = False
+        pack_settings.pack_progress = 0.0
         if cancelled and self._error:
-            submit_settings.submit_status_message = self._error
+            pack_settings.pack_status_message = self._error
         else:
-            submit_settings.submit_status_message = ""
+            pack_settings.pack_status_message = ""
         
         # Force UI redraw
         for area in context.screen.areas:
@@ -352,9 +352,9 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
     """
     import time
     
-    print(f"[SheepIt Submit] Starting ZIP creation...")
-    print(f"[SheepIt Submit]   Directory: {directory}")
-    print(f"[SheepIt Submit]   Output: {output_zip}")
+    print(f"[BBP Export] Starting ZIP creation...")
+    print(f"[BBP Export]   Directory: {directory}")
+    print(f"[BBP Export]   Output: {output_zip}")
     
     # Delete .blend1 through .blend32 backup files before zipping
     if progress_callback:
@@ -366,17 +366,17 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
         backup_files.extend(directory.rglob(pattern))
     
     if backup_files:
-        print(f"[SheepIt Submit]   Found {len(backup_files)} backup files (.blend1-.blend32), deleting...")
+        print(f"[BBP Export]   Found {len(backup_files)} backup files (.blend1-.blend32), deleting...")
         deleted_count = 0
         for backup_file in backup_files:
             try:
                 backup_file.unlink()
                 deleted_count += 1
             except Exception as e:
-                print(f"[SheepIt Submit]   WARNING: Could not delete {backup_file.name}: {e}")
-        print(f"[SheepIt Submit]   Deleted {deleted_count}/{len(backup_files)} backup files")
+                print(f"[BBP Export]   WARNING: Could not delete {backup_file.name}: {e}")
+        print(f"[BBP Export]   Deleted {deleted_count}/{len(backup_files)} backup files")
     else:
-        print(f"[SheepIt Submit]   No backup files (.blend1-.blend32) found")
+        print(f"[BBP Export]   No backup files (.blend1-.blend32) found")
     
     if progress_callback:
         progress_callback(0.0, "Counting files...")
@@ -400,8 +400,8 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
             total_size += file_path.stat().st_size
             file_list.append((file_path, file_path.relative_to(directory)))
     
-    print(f"[SheepIt Submit]   Found {file_count} files, total size: {total_size / (1024*1024):.2f} MB")
-    print(f"[SheepIt Submit]   Creating ZIP (this may take a while)...")
+    print(f"[BBP Export]   Found {file_count} files, total size: {total_size / (1024*1024):.2f} MB")
+    print(f"[BBP Export]   Creating ZIP (this may take a while)...")
     
     if progress_callback:
         progress_callback(1.0, f"Creating ZIP archive ({file_count} files, {total_size / (1024*1024):.1f} MB)...")
@@ -426,25 +426,25 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
                 
                 # Progress updates - more frequent for large files
                 if files_added == 1:
-                    print(f"[SheepIt Submit]   Adding files to ZIP...")
+                    print(f"[BBP Export]   Adding files to ZIP...")
                     if progress_callback:
                         progress_callback(2.0, f"Adding files to ZIP... (1/{file_count})")
                 elif files_added % 10 == 0 or (file_count > 0 and files_added % max(1, file_count // 100) == 0):
                     elapsed = time.time() - start_time
                     rate = files_added / elapsed if elapsed > 0 else 0
                     progress_pct = 2.0 + (files_added / file_count * 93.0) if file_count > 0 else 2.0
-                    print(f"[SheepIt Submit]   Progress: {files_added}/{file_count} files ({files_added*100//file_count}%), {rate:.1f} files/sec")
+                    print(f"[BBP Export]   Progress: {files_added}/{file_count} files ({files_added*100//file_count}%), {rate:.1f} files/sec")
                     if progress_callback:
                         progress_callback(progress_pct, f"Creating ZIP... ({files_added}/{file_count} files, {rate:.1f} files/sec)")
             except Exception as e:
-                print(f"[SheepIt Submit]   WARNING: Failed to add {arcname}: {type(e).__name__}: {str(e)}")
+                print(f"[BBP Export]   WARNING: Failed to add {arcname}: {type(e).__name__}: {str(e)}")
     
     elapsed = time.time() - start_time
-    print(f"[SheepIt Submit] ZIP creation completed!")
-    print(f"[SheepIt Submit]   Files added: {files_added}/{file_count}")
-    print(f"[SheepIt Submit]   Time taken: {elapsed:.2f} seconds")
+    print(f"[BBP Export] ZIP creation completed!")
+    print(f"[BBP Export]   Files added: {files_added}/{file_count}")
+    print(f"[BBP Export]   Time taken: {elapsed:.2f} seconds")
     if elapsed > 0:
-        print(f"[SheepIt Submit]   Average rate: {files_added/elapsed:.1f} files/sec")
+        print(f"[BBP Export]   Average rate: {files_added/elapsed:.1f} files/sec")
     
     if progress_callback:
         progress_callback(100.0, "ZIP archive created")
@@ -452,9 +452,9 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
 
 def register():
     """Register operators."""
-    bpy.utils.register_class(SHEEPIT_OT_submit_current)
+    bpy.utils.register_class(BBP_OT_pack_current)
 
 
 def unregister():
     """Unregister operators."""
-    bpy.utils.unregister_class(SHEEPIT_OT_submit_current)
+    bpy.utils.unregister_class(BBP_OT_pack_current)

@@ -29,12 +29,12 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={version}\n")
-              fh.write(f"zip_name=SheepIt_Project_Submitter.v{version}.zip\n")
+              fh.write(f"zip_name=BasedBlendfilePacker.v{version}.zip\n")
           PY
 
       - name: Create ZIP
         run: |
-          ADDON_DIR=addon_files/sheepit_project_submitter
+          ADDON_DIR=addon_files/based_blendfile_packer
           mkdir -p "$ADDON_DIR"
 
           # Copy top-level files if they exist
@@ -66,5 +66,5 @@ jobs:
         with:
           files: ${{ steps.get_version.outputs.zip_name }}
           tag_name: ${{ inputs.release_tag }}
-          name: SheepIt Project Submitter ${{ steps.get_version.outputs.version }}
+          name: BasedBlendfilePacker ${{ steps.get_version.outputs.version }}
           draft: true

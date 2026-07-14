@@ -1,14 +1,10 @@
 """
-Configuration constants for SheepIt Project Submitter addon.
+Configuration constants for BasedBlendfilePacker addon.
 """
 
 # Addon metadata
-ADDON_NAME = "SheepIt Project Submitter"
-ADDON_ID = "sheepit_project_submitter"
-
-# SheepIt API endpoints (to be researched and updated)
-SHEEPIT_API_BASE = "https://www.sheepit-renderfarm.com"
-SHEEPIT_CLIENT_BASE = "https://client.sheepit-renderfarm.com"
+ADDON_NAME = "BasedBlendfilePacker"
+ADDON_ID = "based_blendfile_packer"
 
 # Debug mode
 DEBUG = False

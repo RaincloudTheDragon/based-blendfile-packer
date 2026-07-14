@@ -1,5 +1,5 @@
 """
-Packing operations for SheepIt Project Submitter.
+Packing operations for BasedBlendfilePacker.
 """
 
 import os
@@ -43,12 +43,12 @@ def _get_asset_usage_module():
     # This avoids "top level module" policy violations
     if __package__:
         # Register as a private submodule of the ops package
-        # e.g., "sheepit_project_submitter.ops._asset_usage" or "bl_ext.vscode_development.sheepit_project_submitter.ops._asset_usage"
+        # e.g., "based_blendfile_packer.ops._asset_usage" or "bl_ext.vscode_development.based_blendfile_packer.ops._asset_usage"
         module_name = f"{__package__}._asset_usage"
     else:
         # Fallback: use a name based on the file location
         # This shouldn't happen in normal operation, but provides a fallback
-        module_name = "sheepit_project_submitter.ops._asset_usage"
+        module_name = "based_blendfile_packer.ops._asset_usage"
     
     try:
         spec = importlib.util.spec_from_file_location(
@@ -64,7 +64,7 @@ def _get_asset_usage_module():
             if __package__:
                 _asset_usage_module.__package__ = __package__
             else:
-                _asset_usage_module.__package__ = "sheepit_project_submitter.ops"
+                _asset_usage_module.__package__ = "based_blendfile_packer.ops"
             
             # Register in sys.modules BEFORE execution so classes can resolve their __module__ attribute
             # Registering as a submodule (with dots) avoids "top level module" policy violations
@@ -230,10 +230,10 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                             or "robocopy")
                         src_str = str(src_dir)
                         dst_str = str(dst_dir)
-                        print(f"[SheepIt Pack]   robocopy: {src_str} -> {dst_str}")
+                        print(f"[BBP Pack]   robocopy: {src_str} -> {dst_str}")
                         cmd = f'"{robocopy_exe}" "{src_str}" "{dst_str}" /E /R:2 /W:1 /NFL /NDL /NJH /NJS'
                         rc = _sub.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
-                        print(f"[SheepIt Pack]   robocopy exit code: {rc.returncode}")
+                        print(f"[BBP Pack]   robocopy exit code: {rc.returncode}")
                         return rc.returncode
                     dst_dir.parent.mkdir(parents=True, exist_ok=True)
                     if dst_dir.exists():
@@ -251,7 +251,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                                 src_count = sum(1 for _ in src_dir.rglob("*"))
                             except Exception:
                                 src_count = "?"
-                        print(f"[SheepIt Pack]   {src_dir.name}: exists={src_exists}, items={src_count}")
+                        print(f"[BBP Pack]   {src_dir.name}: exists={src_exists}, items={src_count}")
                         copy_tree_filtered(src_dir, dst_dir)
                     except PermissionError:
                         used_robocopy = True
@@ -265,7 +265,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                                     pass
                             continue
                     except Exception as e:
-                        print(f"[SheepIt Pack]   WARNING: cache copy failed for {src_dir.name}: {e}")
+                        print(f"[BBP Pack]   WARNING: cache copy failed for {src_dir.name}: {e}")
                         used_robocopy = True
                         rc = _try_robocopy()
                         if rc >= 8 or not _dst_has_files(dst_dir):
@@ -277,7 +277,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                                     pass
                             continue
                     if not _dst_has_files(dst_dir) and not used_robocopy:
-                        print(f"[SheepIt Pack]   {src_dir.name}: Python copy produced 0 files, trying robocopy")
+                        print(f"[BBP Pack]   {src_dir.name}: Python copy produced 0 files, trying robocopy")
                         used_robocopy = True
                         rc = _try_robocopy()
                         if rc >= 8 or not _dst_has_files(dst_dir):
@@ -292,11 +292,11 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                         truncate_caches_to_frame_range(dst_dir, frame_start, frame_end, frame_step)
                         if _dst_has_files(dst_dir):
                             n_after = sum(1 for _ in dst_dir.rglob("*") if _.is_file())
-                            print(f"[SheepIt Pack]   {dst_dir.name}: {n_before} files before truncate, {n_after} after")
+                            print(f"[BBP Pack]   {dst_dir.name}: {n_before} files before truncate, {n_after} after")
                             _add_cache_dir_to_map(src_dir, dst_dir)
                             copied.append(dst_dir)
                         else:
-                            print(f"[SheepIt Pack]   {dst_dir.name}: empty after truncate, skipping")
+                            print(f"[BBP Pack]   {dst_dir.name}: empty after truncate, skipping")
                             try:
                                 shutil.rmtree(dst_dir)
                             except Exception:
@@ -331,7 +331,7 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                         else:
                             missing_on_copy.append(src_dir)
                     except Exception as e:
-                        print(f"[SheepIt Pack] WARNING: Error copying filtered cache {src_dir.name}: {e}")
+                        print(f"[BBP Pack] WARNING: Error copying filtered cache {src_dir.name}: {e}")
                         missing_on_copy.append(src_dir)
                 else:
                     try:
@@ -406,7 +406,7 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
             to_remove.append(cache_file)
 
     if would_keep_count == 0 and to_remove:
-        print(f"[SheepIt Pack]   {cache_dir.name}: no files in frame range {frame_start}-{frame_end} (naming may differ), keeping full cache")
+        print(f"[BBP Pack]   {cache_dir.name}: no files in frame range {frame_start}-{frame_end} (naming may differ), keeping full cache")
         return 0
     files_removed = 0
     for cache_file in to_remove:
@@ -414,7 +414,7 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
             cache_file.unlink()
             files_removed += 1
         except Exception as e:
-            print(f"[SheepIt Pack] WARNING: Could not remove {cache_file.name}: {e}")
+            print(f"[BBP Pack] WARNING: Could not remove {cache_file.name}: {e}")
     return files_removed
 
 
@@ -431,39 +431,39 @@ def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tu
     """
     import subprocess
     import time
-    print(f"[SheepIt Pack] Running Blender script on: {blend_path.name}")
-    print(f"[SheepIt Pack]   Full path: {blend_path}")
-    print(f"[SheepIt Pack]   Timeout: {timeout}s")
+    print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
+    print(f"[BBP Pack]   Full path: {blend_path}")
+    print(f"[BBP Pack]   Timeout: {timeout}s")
     start_time = time.time()
     try:
         result = subprocess.run([
             "blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script
         ], capture_output=True, text=True, check=False, timeout=timeout)
         elapsed = time.time() - start_time
-        print(f"[SheepIt Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
+        print(f"[BBP Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
         if result.stdout:
             stdout_lines = result.stdout.strip().split('\n')
-            print(f"[SheepIt Pack]   stdout ({len(stdout_lines)} lines):")
+            print(f"[BBP Pack]   stdout ({len(stdout_lines)} lines):")
             for line in stdout_lines[:10]:  # First 10 lines
-                print(f"[SheepIt Pack]     {line}")
+                print(f"[BBP Pack]     {line}")
             if len(stdout_lines) > 10:
-                print(f"[SheepIt Pack]     ... ({len(stdout_lines) - 10} more lines)")
+                print(f"[BBP Pack]     ... ({len(stdout_lines) - 10} more lines)")
         if result.stderr:
             stderr_lines = result.stderr.strip().split('\n')
-            print(f"[SheepIt Pack]   stderr ({len(stderr_lines)} lines):")
+            print(f"[BBP Pack]   stderr ({len(stderr_lines)} lines):")
             for line in stderr_lines[:10]:  # First 10 lines
-                print(f"[SheepIt Pack]     {line}")
+                print(f"[BBP Pack]     {line}")
             if len(stderr_lines) > 10:
-                print(f"[SheepIt Pack]     ... ({len(stderr_lines) - 10} more lines)")
+                print(f"[BBP Pack]     ... ({len(stderr_lines) - 10} more lines)")
         return result.stdout, result.stderr, result.returncode
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start_time
-        print(f"[SheepIt Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s)")
-        print(f"[SheepIt Pack]   This may indicate the blend file has issues or is very large")
+        print(f"[BBP Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s)")
+        print(f"[BBP Pack]   This may indicate the blend file has issues or is very large")
         return "", f"Script timed out after {timeout} seconds", -1
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"[SheepIt Pack]   ERROR: Script failed after {elapsed:.2f}s: {type(e).__name__}: {str(e)}")
+        print(f"[BBP Pack]   ERROR: Script failed after {elapsed:.2f}s: {type(e).__name__}: {str(e)}")
         return "", str(e), -1
 
 
@@ -724,16 +724,16 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
                         pass
     
     if returncode != 0:
-        print(f"[SheepIt Pack] WARNING: remap_library_paths returned non-zero exit code: {returncode}")
+        print(f"[BBP Pack] WARNING: remap_library_paths returned non-zero exit code: {returncode}")
         if stderr:
-            print(f"[SheepIt Pack]   Error details: {stderr[:500]}")
+            print(f"[BBP Pack]   Error details: {stderr[:500]}")
     
     if unresolved:
-        print(f"[SheepIt Pack] WARNING: {len(unresolved)} library paths could not be remapped")
+        print(f"[BBP Pack] WARNING: {len(unresolved)} library paths could not be remapped")
         for up in unresolved[:5]:  # Show first 5
-            print(f"[SheepIt Pack]   - {up}")
+            print(f"[BBP Pack]   - {up}")
         if len(unresolved) > 5:
-            print(f"[SheepIt Pack]   ... and {len(unresolved) - 5} more")
+            print(f"[BBP Pack]   ... and {len(unresolved) - 5} more")
     
     return unresolved
 
@@ -803,7 +803,7 @@ def _get_project_size_limit_bytes(context=None):
     """Return project size limit in bytes from scene (per-pack). 0 = no limit (returns None)."""
     try:
         scene = context.scene if context else bpy.context.scene
-        st = getattr(scene, "sheepit_submit", None)
+        st = getattr(scene, "bbp_pack", None)
         if not st or not hasattr(st, "project_size_limit_gb"):
             return 2 * 1024 * 1024 * 1024
         gb = getattr(st, "project_size_limit_gb", 2)
@@ -1001,27 +1001,27 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
                     pass
     
     if missing_files:
-        print(f"[SheepIt Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
+        print(f"[BBP Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
         for mf in missing_files[:5]:  # Show first 5
-            print(f"[SheepIt Pack]     - {mf.name if mf.name else mf}")
+            print(f"[BBP Pack]     - {mf.name if mf.name else mf}")
         if len(missing_files) > 5:
-            print(f"[SheepIt Pack]     ... and {len(missing_files) - 5} more")
-        print(f"[SheepIt Pack]   Note: Missing linked files cannot be packed. The blend file will still be saved without these libraries.")
+            print(f"[BBP Pack]     ... and {len(missing_files) - 5} more")
+        print(f"[BBP Pack]   Note: Missing linked files cannot be packed. The blend file will still be saved without these libraries.")
     
     if oversized_files:
-        print(f"[SheepIt Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over size limit):")
+        print(f"[BBP Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over size limit):")
         for of in oversized_files[:5]:  # Show first 5
             file_size_gb = of.stat().st_size / (1024 * 1024 * 1024) if of.exists() else 0
-            print(f"[SheepIt Pack]     - {of.name if of.name else of} ({file_size_gb:.2f} GB)")
+            print(f"[BBP Pack]     - {of.name if of.name else of} ({file_size_gb:.2f} GB)")
         if len(oversized_files) > 5:
-            print(f"[SheepIt Pack]     ... and {len(oversized_files) - 5} more")
-        print(f"[SheepIt Pack]   Note: Blender cannot pack linked files over the project size limit. These libraries will remain as external references.")
-        print(f"[SheepIt Pack]   To fix: Reduce the size of these files or split them into smaller files.")
+            print(f"[BBP Pack]     ... and {len(oversized_files) - 5} more")
+        print(f"[BBP Pack]   Note: Blender cannot pack linked files over the project size limit. These libraries will remain as external references.")
+        print(f"[BBP Pack]   To fix: Reduce the size of these files or split them into smaller files.")
     
     if returncode != 0:
-        print(f"[SheepIt Pack] WARNING: pack_linked_in_blend returned non-zero exit code: {returncode}")
+        print(f"[BBP Pack] WARNING: pack_linked_in_blend returned non-zero exit code: {returncode}")
         if stderr:
-            print(f"[SheepIt Pack]   Error details: {stderr[:500]}")
+            print(f"[BBP Pack]   Error details: {stderr[:500]}")
     
     return missing_files, oversized_files
 
@@ -1156,28 +1156,28 @@ class IncrementalPacker:
         
         if self.phase == 'INIT':
             if self.target_path is None:
-                self.target_path = Path(tempfile.mkdtemp(prefix="sheepit_pack_"))
-                print(f"[SheepIt Pack] Created temporary directory: {self.target_path}")
+                self.target_path = Path(tempfile.mkdtemp(prefix="bbp_pack_"))
+                print(f"[BBP Pack] Created temporary directory: {self.target_path}")
             else:
-                print(f"[SheepIt Pack] Using provided target path: {self.target_path}")
+                print(f"[BBP Pack] Using provided target path: {self.target_path}")
             
-            print(f"[SheepIt Pack] Mode: {'COPY_ONLY' if self.copy_only_mode else 'PACK_AND_SAVE'}")
+            print(f"[BBP Pack] Mode: {'COPY_ONLY' if self.copy_only_mode else 'PACK_AND_SAVE'}")
             self.phase = 'FIND_ASSETS'
             return ('FIND_ASSETS', False)
         
         elif self.phase == 'FIND_ASSETS':
-            print(f"[SheepIt Pack] Finding asset usages...")
+            print(f"[BBP Pack] Finding asset usages...")
             if self.progress_callback:
                 self.progress_callback(5.0, "Finding asset usages...")
             self.asset_usages = au.find()
             self.top_level_blend_abs = au.library_abspath(None).resolve()
-            print(f"[SheepIt Pack] Found {len(self.asset_usages)} libraries with assets")
-            print(f"[SheepIt Pack] Top-level blend: {self.top_level_blend_abs}")
+            print(f"[BBP Pack] Found {len(self.asset_usages)} libraries with assets")
+            print(f"[BBP Pack] Top-level blend: {self.top_level_blend_abs}")
             self.phase = 'COLLECT_PATHS'
             return ('COLLECT_PATHS', False)
         
         elif self.phase == 'COLLECT_PATHS':
-            print(f"[SheepIt Pack] Collecting all file paths...")
+            print(f"[BBP Pack] Collecting all file paths...")
             if self.progress_callback:
                 self.progress_callback(10.0, "Collecting file paths...")
             self.all_filepaths = []
@@ -1191,39 +1191,39 @@ class IncrementalPacker:
             if self.temp_blend_path:
                 temp_path_resolved = self.temp_blend_path.resolve()
                 self.all_filepaths = [p for p in self.all_filepaths if p != temp_path_resolved]
-                print(f"[SheepIt Pack]   Excluded temp file from common root calculation")
+                print(f"[BBP Pack]   Excluded temp file from common root calculation")
             # Use resolved paths only so common_root is deterministic (no A:\ vs UNC mix)
             self.all_filepaths = [Path(p).resolve() for p in self.all_filepaths]
-            print(f"[SheepIt Pack] Collected {len(self.all_filepaths)} total file paths")
+            print(f"[BBP Pack] Collected {len(self.all_filepaths)} total file paths")
             self.phase = 'FIND_COMMON_ROOT'
             return ('FIND_COMMON_ROOT', False)
         
         elif self.phase == 'FIND_COMMON_ROOT':
-            print(f"[SheepIt Pack] Determining common root directory...")
+            print(f"[BBP Pack] Determining common root directory...")
             try:
                 common_root_str = os.path.commonpath(self.all_filepaths)
-                print(f"[SheepIt Pack] Common root (method 1): {common_root_str}")
+                print(f"[BBP Pack] Common root (method 1): {common_root_str}")
             except ValueError:
-                print(f"[SheepIt Pack] Method 1 failed, trying drive-based approach...")
+                print(f"[BBP Pack] Method 1 failed, trying drive-based approach...")
                 blend_file_drive = Path(bpy.data.filepath).drive if hasattr(Path(bpy.data.filepath), 'drive') else ""
                 project_filepaths = [p for p in self.all_filepaths if getattr(p, "drive", "") == blend_file_drive]
                 if project_filepaths:
                     common_root_str = os.path.commonpath(project_filepaths)
-                    print(f"[SheepIt Pack] Common root (method 2): {common_root_str}")
+                    print(f"[BBP Pack] Common root (method 2): {common_root_str}")
                 else:
                     common_root_str = str(Path(bpy.data.filepath).parent)
-                    print(f"[SheepIt Pack] Common root (fallback): {common_root_str}")
+                    print(f"[BBP Pack] Common root (fallback): {common_root_str}")
             
             if not common_root_str:
                 raise ValueError("Could not find a common root directory for these assets.")
             
             self.common_root = Path(common_root_str)
-            print(f"[SheepIt Pack] Using common root: {self.common_root}")
+            print(f"[BBP Pack] Using common root: {self.common_root}")
             self.phase = 'PREPARE_COPY_TOP_BLEND'
             return ('PREPARE_COPY_TOP_BLEND', False)
         
         elif self.phase == 'PREPARE_COPY_TOP_BLEND':
-            print(f"[SheepIt Pack] Copying top-level blend file...")
+            print(f"[BBP Pack] Copying top-level blend file...")
             if self.progress_callback:
                 self.progress_callback(15.0, "Copying top-level blend file...")
             
@@ -1237,19 +1237,19 @@ class IncrementalPacker:
             if is_temp_file:
                 # Copy temp file directly to target root
                 target_path_file = self.target_path / current_blend_abspath.name
-                print(f"[SheepIt Pack]   Temp file detected, copying directly to target root: {target_path_file.name}")
+                print(f"[BBP Pack]   Temp file detected, copying directly to target root: {target_path_file.name}")
             else:
                 try:
                     current_relpath = current_blend_abspath.relative_to(self.common_root)
-                    print(f"[SheepIt Pack]   Relative path: {current_relpath}")
+                    print(f"[BBP Pack]   Relative path: {current_relpath}")
                 except ValueError:
                     current_relpath = compute_target_relpath(current_blend_abspath, self.common_root)
-                    print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
+                    print(f"[BBP Pack]   Computed relative path: {current_relpath}")
                 target_path_file = self.target_path / current_relpath
             
             current_blend_resolved = current_blend_abspath.resolve()
             if current_blend_resolved not in self.copied_paths:
-                print(f"[SheepIt Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
+                print(f"[BBP Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
                 try:
                     target_path_file.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(current_blend_abspath, target_path_file)
@@ -1257,18 +1257,18 @@ class IncrementalPacker:
                     if current_blend_abspath.suffix.lower() == ".blend":
                         self.copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
                     self.top_level_target_blend = target_path_file.resolve()
-                    print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
+                    print(f"[BBP Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
                     # Copy caches - use original blend path for cache lookup if temp file
                     cache_source_blend = self.original_blend_path if (is_temp_file and self.original_blend_path) else current_blend_abspath
                     if cache_source_blend:
-                        print(f"[SheepIt Pack]   Copying blend caches from: {cache_source_blend}")
+                        print(f"[BBP Pack]   Copying blend caches from: {cache_source_blend}")
                         # For COPY_ONLY workflow, filter caches during copy if frame range is specified
                         filter_during_copy = (self.copy_only_mode and 
                                              self.frame_start is not None and 
                                              self.frame_end is not None and 
                                              self.frame_step is not None)
                         if filter_during_copy:
-                            print(f"[SheepIt Pack]   Filtering caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step}) during copy...")
+                            print(f"[BBP Pack]   Filtering caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step}) during copy...")
                         copied_cache_dirs = copy_blend_caches(
                             cache_source_blend, target_path_file, self.missing_on_copy,
                             frame_start=self.frame_start if filter_during_copy else None,
@@ -1277,14 +1277,14 @@ class IncrementalPacker:
                             copy_map_out=self.copy_map,
                         )
                         self.cache_dirs.extend(copied_cache_dirs)
-                        print(f"[SheepIt Pack]   Copied {len(copied_cache_dirs)} cache directories")
+                        print(f"[BBP Pack]   Copied {len(copied_cache_dirs)} cache directories")
                 except Exception as e:
-                    print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
+                    print(f"[BBP Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
                     self.missing_on_copy.append(current_blend_abspath)
             
             # Prepare asset copy list (dedupe by resolved path so each file copied once)
             total_assets = sum(len(links) for links in self.asset_usages.values())
-            print(f"[SheepIt Pack] Preparing to copy {total_assets} asset files...")
+            print(f"[BBP Pack] Preparing to copy {total_assets} asset files...")
             seen_resolved = set()
             for lib, links_to in self.asset_usages.items():
                 for asset_usage in links_to:
@@ -1320,7 +1320,7 @@ class IncrementalPacker:
                 if resolved in self.copied_paths:
                     continue
                 if not asset_usage.abspath.exists():
-                    print(f"[SheepIt Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
+                    print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
                     self.missing_on_copy.append(asset_usage.abspath)
                     continue
                 
@@ -1334,9 +1334,9 @@ class IncrementalPacker:
                     if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
                         self.copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
                     if (i < 5) or (i % 50 == 0):
-                        print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
+                        print(f"[BBP Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
                 except Exception as e:
-                    print(f"[SheepIt Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
+                    print(f"[BBP Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
                     self.missing_on_copy.append(asset_usage.abspath)
             
             self.assets_copied = batch_end
@@ -1346,12 +1346,12 @@ class IncrementalPacker:
             if self.progress_callback:
                 self.progress_callback(progress_pct, f"Copying assets... ({self.assets_copied}/{total_assets})")
             if self.assets_copied % 10 == 0 or self.assets_copied == total_assets:
-                print(f"[SheepIt Pack]   Copied {self.assets_copied}/{total_assets} assets ({progress_pct:.1f}%)...")
+                print(f"[BBP Pack]   Copied {self.assets_copied}/{total_assets} assets ({progress_pct:.1f}%)...")
             
             if self.assets_copied >= total_assets:
-                print(f"[SheepIt Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
+                print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
                 if self.missing_on_copy:
-                    print(f"[SheepIt Pack]   Missing files: {[str(p) for p in self.missing_on_copy[:5]]}...")
+                    print(f"[BBP Pack]   Missing files: {[str(p) for p in self.missing_on_copy[:5]]}...")
                 # Check if we need to truncate caches
                 # Skip truncation for COPY_ONLY workflow if caches were filtered during copy
                 caches_filtered_during_copy = (self.copy_only_mode and 
@@ -1366,7 +1366,7 @@ class IncrementalPacker:
                     return ('TRUNCATING_CACHES', False)
                 else:
                     if caches_filtered_during_copy:
-                        print(f"[SheepIt Pack] Caches were filtered during copy, skipping truncation phase")
+                        print(f"[BBP Pack] Caches were filtered during copy, skipping truncation phase")
                     self.phase = 'FIND_DEPENDENCIES'
                     return ('FIND_DEPENDENCIES', False)
             else:
@@ -1374,7 +1374,7 @@ class IncrementalPacker:
         
         elif self.phase == 'TRUNCATING_CACHES':
             if self.cache_truncate_index == 0:
-                print(f"[SheepIt Pack] Truncating caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step})...")
+                print(f"[BBP Pack] Truncating caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step})...")
                 if self.progress_callback:
                     self.progress_callback(45.0, "Truncating caches to frame range...")
             
@@ -1385,18 +1385,18 @@ class IncrementalPacker:
                     progress_pct = 45.0 + ((self.cache_truncate_index + 1) / len(self.cache_dirs) * 0.5) if self.cache_dirs else 45.0
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Truncating caches... ({self.cache_truncate_index + 1}/{len(self.cache_dirs)} cache directories)")
-                    print(f"[SheepIt Pack]   [{self.cache_truncate_index + 1}/{len(self.cache_dirs)}] Truncating cache: {cache_dir.name}")
+                    print(f"[BBP Pack]   [{self.cache_truncate_index + 1}/{len(self.cache_dirs)}] Truncating cache: {cache_dir.name}")
                     files_removed = truncate_caches_to_frame_range(cache_dir, self.frame_start, self.frame_end, self.frame_step)
-                    print(f"[SheepIt Pack]   Removed {files_removed} cache files outside frame range")
+                    print(f"[BBP Pack]   Removed {files_removed} cache files outside frame range")
                 self.cache_truncate_index += 1
                 return ('TRUNCATING_CACHES', False)
             else:
-                print(f"[SheepIt Pack] Finished truncating caches to frame range {self.frame_start}-{self.frame_end}")
+                print(f"[BBP Pack] Finished truncating caches to frame range {self.frame_start}-{self.frame_end}")
                 self.phase = 'FIND_DEPENDENCIES'
                 return ('FIND_DEPENDENCIES', False)
         
         elif self.phase == 'FIND_DEPENDENCIES':
-            print(f"[SheepIt Pack] Finding blend dependencies...")
+            print(f"[BBP Pack] Finding blend dependencies...")
             if self.progress_callback:
                 self.progress_callback(45.0, "Finding blend dependencies...")
             self.blend_deps = au.find_blend_asset_usage()
@@ -1405,7 +1405,7 @@ class IncrementalPacker:
             # Add top-level blend (use the copied target path, not the original)
             if self.top_level_target_blend and self.top_level_target_blend.exists():
                 self.to_remap.append(self.top_level_target_blend)
-                print(f"[SheepIt Pack]   Added top-level blend to remap list: {self.top_level_target_blend.name}")
+                print(f"[BBP Pack]   Added top-level blend to remap list: {self.top_level_target_blend.name}")
             
             # Add all dependent blend files
             for lib in self.blend_deps.keys():
@@ -1419,18 +1419,18 @@ class IncrementalPacker:
                 target_blend = self.target_path / rel
                 if target_blend.exists():
                     self.to_remap.append(target_blend)
-                    print(f"[SheepIt Pack]   Added dependent blend to remap list: {target_blend.name}")
+                    print(f"[BBP Pack]   Added dependent blend to remap list: {target_blend.name}")
                 else:
-                    print(f"[SheepIt Pack]   WARNING: Dependent blend not found at target: {target_blend}")
+                    print(f"[BBP Pack]   WARNING: Dependent blend not found at target: {target_blend}")
             
-            print(f"[SheepIt Pack] Found {len(self.to_remap)} blend files to process")
+            print(f"[BBP Pack] Found {len(self.to_remap)} blend files to process")
             self.nla_index = 0
             self.phase = 'ENABLE_NLA' if self.enable_nla else 'REMAP_PATHS'
             return (self.phase, False)
         
         elif self.phase == 'ENABLE_NLA':
             if self.nla_index == 0:
-                print(f"[SheepIt Pack] Enabling NLA tracks in blend files...")
+                print(f"[BBP Pack] Enabling NLA tracks in blend files...")
                 if self.progress_callback:
                     self.progress_callback(50.0, "Enabling NLA tracks...")
             
@@ -1441,19 +1441,19 @@ class IncrementalPacker:
                     progress_pct = 50.0 + ((self.nla_index + 1) / len(self.to_remap) * 5.0) if self.to_remap else 50.0
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Enabling NLA in blend files... ({self.nla_index + 1}/{len(self.to_remap)})")
-                    print(f"[SheepIt Pack]   [{self.nla_index + 1}/{len(self.to_remap)}] Enabling NLA in: {blend_to_fix.name}")
+                    print(f"[BBP Pack]   [{self.nla_index + 1}/{len(self.to_remap)}] Enabling NLA in: {blend_to_fix.name}")
                     enable_nla_in_blend(blend_to_fix, autopack_on_save=self.autopack_on_save)
                 self.nla_index += 1
                 return ('ENABLE_NLA', False)
             else:
-                print(f"[SheepIt Pack] Finished enabling NLA")
+                print(f"[BBP Pack] Finished enabling NLA")
                 self.remap_index = 0
                 self.phase = 'REMAP_PATHS'
                 return ('REMAP_PATHS', False)
         
         elif self.phase == 'REMAP_PATHS':
             if self.remap_index == 0:
-                print(f"[SheepIt Pack] Remapping library paths in blend files...")
+                print(f"[BBP Pack] Remapping library paths in blend files...")
                 if self.progress_callback:
                     self.progress_callback(55.0, "Remapping library paths...")
             
@@ -1464,7 +1464,7 @@ class IncrementalPacker:
                     progress_pct = 55.0 + ((self.remap_index + 1) / len(self.to_remap) * 10.0) if self.to_remap else 55.0
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Remapping paths... ({self.remap_index + 1}/{len(self.to_remap)})")
-                    print(f"[SheepIt Pack]   [{self.remap_index + 1}/{len(self.to_remap)}] Remapping paths in: {blend_to_fix.name}")
+                    print(f"[BBP Pack]   [{self.remap_index + 1}/{len(self.to_remap)}] Remapping paths in: {blend_to_fix.name}")
                     unresolved = remap_library_paths(
                         blend_to_fix,
                         self.copy_map,
@@ -1473,15 +1473,15 @@ class IncrementalPacker:
                         ensure_autopack=self.autopack_on_save,
                     )
                     if unresolved:
-                        print(f"[SheepIt Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
+                        print(f"[BBP Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
                         for up in unresolved[:3]:  # Show first 3
-                            print(f"[SheepIt Pack]       - {up}")
+                            print(f"[BBP Pack]       - {up}")
                         if len(unresolved) > 3:
-                            print(f"[SheepIt Pack]       ... and {len(unresolved) - 3} more")
+                            print(f"[BBP Pack]       ... and {len(unresolved) - 3} more")
                 self.remap_index += 1
                 return ('REMAP_PATHS', False)
             else:
-                print(f"[SheepIt Pack] Finished remapping library paths")
+                print(f"[BBP Pack] Finished remapping library paths")
                 if not self.copy_only_mode:
                     self.pack_all_index = 0
                     self.phase = 'PACK_ALL'
@@ -1492,7 +1492,7 @@ class IncrementalPacker:
         
         elif self.phase == 'PACK_ALL':
             if self.pack_all_index == 0:
-                print(f"[SheepIt Pack] Packing all assets into blend files...")
+                print(f"[BBP Pack] Packing all assets into blend files...")
                 if self.progress_callback:
                     self.progress_callback(65.0, "Packing assets into blend files...")
             
@@ -1503,12 +1503,12 @@ class IncrementalPacker:
                     progress_pct = 65.0 + ((self.pack_all_index + 1) / len(self.to_remap) * 15.0) if self.to_remap else 65.0
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Packing assets... ({self.pack_all_index + 1}/{len(self.to_remap)})")
-                    print(f"[SheepIt Pack]   [{self.pack_all_index + 1}/{len(self.to_remap)}] Packing all in: {blend_to_fix.name}")
+                    print(f"[BBP Pack]   [{self.pack_all_index + 1}/{len(self.to_remap)}] Packing all in: {blend_to_fix.name}")
                     pack_all_in_blend(blend_to_fix)
                 self.pack_all_index += 1
                 return ('PACK_ALL', False)
             else:
-                print(f"[SheepIt Pack] Finished packing all assets")
+                print(f"[BBP Pack] Finished packing all assets")
                 if self.run_pack_linked:
                     self.pack_linked_index = 0
                     self.phase = 'PACK_LINKED'
@@ -1519,7 +1519,7 @@ class IncrementalPacker:
         
         elif self.phase == 'PACK_LINKED':
             if self.pack_linked_index == 0:
-                print(f"[SheepIt Pack] Packing linked libraries...")
+                print(f"[BBP Pack] Packing linked libraries...")
                 if self.progress_callback:
                     self.progress_callback(80.0, "Packing linked libraries...")
             
@@ -1530,8 +1530,8 @@ class IncrementalPacker:
                     progress_pct = 80.0 + ((self.pack_linked_index + 1) / len(self.to_remap) * 15.0) if self.to_remap else 80.0
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Packing linked... ({self.pack_linked_index + 1}/{len(self.to_remap)})")
-                    print(f"[SheepIt Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    print(f"[SheepIt Pack]   Starting pack_linked operation (this may take a while for large files)...")
+                    print(f"[BBP Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
+                    print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
                         missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=self.max_size_bytes)
                         # Track oversized files for user reporting
@@ -1543,26 +1543,26 @@ class IncrementalPacker:
                         if oversized_files:
                             issues.append(f"{len(oversized_files)} over size limit")
                         if issues:
-                            print(f"[SheepIt Pack]   Completed pack_linked for: {blend_to_fix.name} (with {', '.join(issues)} linked files that couldn't be packed)")
+                            print(f"[BBP Pack]   Completed pack_linked for: {blend_to_fix.name} (with {', '.join(issues)} linked files that couldn't be packed)")
                         else:
-                            print(f"[SheepIt Pack]   Completed pack_linked for: {blend_to_fix.name}")
+                            print(f"[BBP Pack]   Completed pack_linked for: {blend_to_fix.name}")
                     except Exception as e:
-                        print(f"[SheepIt Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
+                        print(f"[BBP Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         # Continue with next file rather than failing completely
                 else:
-                    print(f"[SheepIt Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
+                    print(f"[BBP Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
                 self.pack_linked_index += 1
                 return ('PACK_LINKED', False)
             else:
-                print(f"[SheepIt Pack] Finished packing linked libraries")
+                print(f"[BBP Pack] Finished packing linked libraries")
                 self.phase = 'COMPLETE'
                 return ('COMPLETE', False)
         
         elif self.phase == 'COMPLETE':
-            print(f"[SheepIt Pack] Pack process completed successfully!")
-            print(f"[SheepIt Pack] Output directory: {self.target_path}")
+            print(f"[BBP Pack] Pack process completed successfully!")
+            print(f"[BBP Pack] Output directory: {self.target_path}")
             
             # Determine file path for submission
             if self.copy_only_mode:
@@ -1572,13 +1572,13 @@ class IncrementalPacker:
                 # For pack-and-save, return the main target blend file
                 if self.top_level_target_blend and self.top_level_target_blend.exists():
                     self.file_path = self.top_level_target_blend
-                    print(f"[SheepIt Pack] Target blend file for submission: {self.file_path}")
+                    print(f"[BBP Pack] Target blend file for submission: {self.file_path}")
                 else:
                     # Fallback: find the first .blend file in target_path
                     blend_files = list(self.target_path.rglob("*.blend"))
                     if blend_files:
                         self.file_path = blend_files[0]
-                        print(f"[SheepIt Pack] Found blend file for submission: {self.file_path}")
+                        print(f"[BBP Pack] Found blend file for submission: {self.file_path}")
             
             return ('COMPLETE', True)
         
@@ -1600,34 +1600,34 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         - target_path: Path to the packed output directory
         - file_path: Path to the file to submit (ZIP for copy-only, blend for pack-and-save)
     """
-    print(f"[SheepIt Pack] Starting pack process: workflow={workflow}, enable_nla={enable_nla}")
+    print(f"[BBP Pack] Starting pack process: workflow={workflow}, enable_nla={enable_nla}")
     
     if target_path is None:
-        target_path = Path(tempfile.mkdtemp(prefix="sheepit_pack_"))
-        print(f"[SheepIt Pack] Created temporary directory: {target_path}")
+        target_path = Path(tempfile.mkdtemp(prefix="bbp_pack_"))
+        print(f"[BBP Pack] Created temporary directory: {target_path}")
     else:
-        print(f"[SheepIt Pack] Using provided target path: {target_path}")
+        print(f"[BBP Pack] Using provided target path: {target_path}")
     
     copy_only_mode = workflow == WorkflowMode.COPY_ONLY
     autopack_on_save = not copy_only_mode
     run_pack_linked = not copy_only_mode
     
-    print(f"[SheepIt Pack] Mode: {'COPY_ONLY' if copy_only_mode else 'PACK_AND_SAVE'}")
-    print(f"[SheepIt Pack] Autopack on save: {autopack_on_save}, Pack linked: {run_pack_linked}")
+    print(f"[BBP Pack] Mode: {'COPY_ONLY' if copy_only_mode else 'PACK_AND_SAVE'}")
+    print(f"[BBP Pack] Autopack on save: {autopack_on_save}, Pack linked: {run_pack_linked}")
     
     # Find asset usages
-    print(f"[SheepIt Pack] Finding asset usages...")
+    print(f"[BBP Pack] Finding asset usages...")
     if progress_callback:
         progress_callback(5.0, "Finding asset usages...")
     if cancel_check and cancel_check():
         raise InterruptedError("Packing cancelled by user")
     asset_usages = au.find()
     top_level_blend_abs = au.library_abspath(None).resolve()
-    print(f"[SheepIt Pack] Found {len(asset_usages)} libraries with assets")
-    print(f"[SheepIt Pack] Top-level blend: {top_level_blend_abs}")
+    print(f"[BBP Pack] Found {len(asset_usages)} libraries with assets")
+    print(f"[BBP Pack] Top-level blend: {top_level_blend_abs}")
     
     # Collect all file paths
-    print(f"[SheepIt Pack] Collecting all file paths...")
+    print(f"[BBP Pack] Collecting all file paths...")
     if progress_callback:
         progress_callback(10.0, "Collecting file paths...")
     if cancel_check and cancel_check():
@@ -1639,32 +1639,32 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         for asset_usages in asset_usages.values()
         for asset_usage in asset_usages
     )
-    print(f"[SheepIt Pack] Collected {len(all_filepaths)} total file paths")
+    print(f"[BBP Pack] Collected {len(all_filepaths)} total file paths")
     
     # Determine common root
-    print(f"[SheepIt Pack] Determining common root directory...")
+    print(f"[BBP Pack] Determining common root directory...")
     try:
         common_root_str = os.path.commonpath(all_filepaths)
-        print(f"[SheepIt Pack] Common root (method 1): {common_root_str}")
+        print(f"[BBP Pack] Common root (method 1): {common_root_str}")
     except ValueError:
-        print(f"[SheepIt Pack] Method 1 failed, trying drive-based approach...")
+        print(f"[BBP Pack] Method 1 failed, trying drive-based approach...")
         blend_file_drive = Path(bpy.data.filepath).drive if hasattr(Path(bpy.data.filepath), 'drive') else ""
         project_filepaths = [p for p in all_filepaths if getattr(p, "drive", "") == blend_file_drive]
         if project_filepaths:
             common_root_str = os.path.commonpath(project_filepaths)
-            print(f"[SheepIt Pack] Common root (method 2): {common_root_str}")
+            print(f"[BBP Pack] Common root (method 2): {common_root_str}")
         else:
             common_root_str = str(Path(bpy.data.filepath).parent)
-            print(f"[SheepIt Pack] Common root (fallback): {common_root_str}")
+            print(f"[BBP Pack] Common root (fallback): {common_root_str}")
     
     if not common_root_str:
         raise ValueError("Could not find a common root directory for these assets.")
     
     common_root = Path(common_root_str)
-    print(f"[SheepIt Pack] Using common root: {common_root}")
+    print(f"[BBP Pack] Using common root: {common_root}")
     
     # Copy files
-    print(f"[SheepIt Pack] Starting file copy process...")
+    print(f"[BBP Pack] Starting file copy process...")
     if progress_callback:
         progress_callback(15.0, "Starting file copy process...")
     if cancel_check and cancel_check():
@@ -1674,20 +1674,20 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     missing_on_copy = []
     
     # Copy top-level blend
-    print(f"[SheepIt Pack] Copying top-level blend file...")
+    print(f"[BBP Pack] Copying top-level blend file...")
     current_blend_abspath = top_level_blend_abs
     try:
         current_relpath = current_blend_abspath.relative_to(common_root)
-        print(f"[SheepIt Pack]   Relative path: {current_relpath}")
+        print(f"[BBP Pack]   Relative path: {current_relpath}")
     except ValueError:
         current_relpath = compute_target_relpath(current_blend_abspath, common_root)
-        print(f"[SheepIt Pack]   Computed relative path: {current_relpath}")
+        print(f"[BBP Pack]   Computed relative path: {current_relpath}")
     
     top_level_target_blend = None
     current_blend_resolved = current_blend_abspath.resolve()
     if current_blend_resolved not in copied_paths:
         target_path_file = target_path / current_relpath
-        print(f"[SheepIt Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
+        print(f"[BBP Pack]   Copying: {current_blend_abspath} -> {target_path_file}")
         try:
             target_path_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(current_blend_abspath, target_path_file)
@@ -1695,21 +1695,21 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             if current_blend_abspath.suffix.lower() == ".blend":
                 copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
             top_level_target_blend = target_path_file.resolve()
-            print(f"[SheepIt Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
+            print(f"[BBP Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
             # Copy caches
-            print(f"[SheepIt Pack]   Copying blend caches...")
+            print(f"[BBP Pack]   Copying blend caches...")
             # Legacy function doesn't support frame range filtering - copy all caches
             cache_count = copy_blend_caches(current_blend_abspath, target_path_file, missing_on_copy,
                                           frame_start=None, frame_end=None, frame_step=None,
                                           copy_map_out=copy_map)
-            print(f"[SheepIt Pack]   Copied {cache_count} cache directories")
+            print(f"[BBP Pack]   Copied {cache_count} cache directories")
         except Exception as e:
-            print(f"[SheepIt Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
+            print(f"[BBP Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
             missing_on_copy.append(current_blend_abspath)
     
     # Copy other assets
     total_assets = sum(len(links) for links in asset_usages.values())
-    print(f"[SheepIt Pack] Copying {total_assets} asset files...")
+    print(f"[BBP Pack] Copying {total_assets} asset files...")
     asset_count = 0
     seen_resolved = set()
     for lib, links_to in asset_usages.items():
@@ -1724,7 +1724,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 progress_pct = 15.0 + (asset_count / total_assets * 30.0) if total_assets > 0 else 15.0
                 if progress_callback:
                     progress_callback(progress_pct, f"Copying assets... ({asset_count}/{total_assets})")
-                print(f"[SheepIt Pack]   Copied {asset_count}/{total_assets} assets ({progress_pct:.1f}%)...")
+                print(f"[BBP Pack]   Copied {asset_count}/{total_assets} assets ({progress_pct:.1f}%)...")
             if cancel_check and cancel_check():
                 raise InterruptedError("Packing cancelled by user")
             
@@ -1734,7 +1734,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 asset_relpath = compute_target_relpath(resolved, common_root)
             
             if not asset_usage.abspath.exists():
-                print(f"[SheepIt Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
+                print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
                 missing_on_copy.append(asset_usage.abspath)
                 continue
             
@@ -1748,17 +1748,17 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
                     copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
                 if asset_count <= 5 or asset_count % 50 == 0:  # Log first 5 and every 50th
-                    print(f"[SheepIt Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
+                    print(f"[BBP Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
             except Exception as e:
-                print(f"[SheepIt Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
+                print(f"[BBP Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
                 missing_on_copy.append(asset_usage.abspath)
     
-    print(f"[SheepIt Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
+    print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
     if missing_on_copy:
-        print(f"[SheepIt Pack]   Missing files: {[str(p) for p in missing_on_copy[:5]]}...")  # First 5
+        print(f"[BBP Pack]   Missing files: {[str(p) for p in missing_on_copy[:5]]}...")  # First 5
     
     # Remap library paths
-    print(f"[SheepIt Pack] Finding blend dependencies...")
+    print(f"[BBP Pack] Finding blend dependencies...")
     if progress_callback:
         progress_callback(45.0, "Finding blend dependencies...")
     if cancel_check and cancel_check():
@@ -1774,11 +1774,11 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             rel = compute_target_relpath(abs_path, common_root)
         to_remap.append(target_path / rel)
     
-    print(f"[SheepIt Pack] Found {len(to_remap)} blend files to process")
+    print(f"[BBP Pack] Found {len(to_remap)} blend files to process")
     
     # Enable NLA before packing
     if enable_nla:
-        print(f"[SheepIt Pack] Enabling NLA tracks in blend files...")
+        print(f"[BBP Pack] Enabling NLA tracks in blend files...")
         if progress_callback:
             progress_callback(50.0, "Enabling NLA tracks...")
         for i, blend_to_fix in enumerate(to_remap, 1):
@@ -1788,12 +1788,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 progress_pct = 50.0 + (i / len(to_remap) * 5.0) if to_remap else 50.0
                 if progress_callback:
                     progress_callback(progress_pct, f"Enabling NLA in blend files... ({i}/{len(to_remap)})")
-                print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Enabling NLA in: {blend_to_fix.name}")
+                print(f"[BBP Pack]   [{i}/{len(to_remap)}] Enabling NLA in: {blend_to_fix.name}")
                 enable_nla_in_blend(blend_to_fix, autopack_on_save=autopack_on_save)
-        print(f"[SheepIt Pack] Finished enabling NLA")
+        print(f"[BBP Pack] Finished enabling NLA")
     
     # Remap library paths
-    print(f"[SheepIt Pack] Remapping library paths in blend files...")
+    print(f"[BBP Pack] Remapping library paths in blend files...")
     if progress_callback:
         progress_callback(55.0, "Remapping library paths...")
     for i, blend_to_fix in enumerate(to_remap, 1):
@@ -1803,7 +1803,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             progress_pct = 55.0 + (i / len(to_remap) * 10.0) if to_remap else 55.0
             if progress_callback:
                 progress_callback(progress_pct, f"Remapping paths... ({i}/{len(to_remap)})")
-            print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Remapping paths in: {blend_to_fix.name}")
+            print(f"[BBP Pack]   [{i}/{len(to_remap)}] Remapping paths in: {blend_to_fix.name}")
             remap_library_paths(
                 blend_to_fix,
                 copy_map,
@@ -1811,11 +1811,11 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 target_path,
                 ensure_autopack=autopack_on_save,
             )
-    print(f"[SheepIt Pack] Finished remapping library paths")
+    print(f"[BBP Pack] Finished remapping library paths")
     
     # Pack files if not copy-only
     if not copy_only_mode:
-        print(f"[SheepIt Pack] Packing all assets into blend files...")
+        print(f"[BBP Pack] Packing all assets into blend files...")
         if progress_callback:
             progress_callback(65.0, "Packing assets into blend files...")
         for i, blend_to_fix in enumerate(to_remap, 1):
@@ -1825,12 +1825,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 progress_pct = 65.0 + (i / len(to_remap) * 15.0) if to_remap else 65.0
                 if progress_callback:
                     progress_callback(progress_pct, f"Packing assets... ({i}/{len(to_remap)})")
-                print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Packing all in: {blend_to_fix.name}")
+                print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing all in: {blend_to_fix.name}")
                 pack_all_in_blend(blend_to_fix)
-        print(f"[SheepIt Pack] Finished packing all assets")
+        print(f"[BBP Pack] Finished packing all assets")
         
         if run_pack_linked:
-            print(f"[SheepIt Pack] Packing linked libraries...")
+            print(f"[BBP Pack] Packing linked libraries...")
             if progress_callback:
                 progress_callback(80.0, "Packing linked libraries...")
             for i, blend_to_fix in enumerate(to_remap, 1):
@@ -1840,7 +1840,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     progress_pct = 80.0 + (i / len(to_remap) * 15.0) if to_remap else 80.0
                     if progress_callback:
                         progress_callback(progress_pct, f"Packing linked... ({i}/{len(to_remap)})")
-                    print(f"[SheepIt Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
+                    print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
                     max_size_bytes = _get_project_size_limit_bytes()
                     missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=max_size_bytes)
                     issues = []
@@ -1849,11 +1849,11 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     if oversized_files:
                         issues.append(f"{len(oversized_files)} over 2GB")
                     if issues:
-                        print(f"[SheepIt Pack]     Note: {', '.join(issues)} linked files could not be packed")
-            print(f"[SheepIt Pack] Finished packing linked libraries")
+                        print(f"[BBP Pack]     Note: {', '.join(issues)} linked files could not be packed")
+            print(f"[BBP Pack] Finished packing linked libraries")
     
-    print(f"[SheepIt Pack] Pack process completed successfully!")
-    print(f"[SheepIt Pack] Output directory: {target_path}")
+    print(f"[BBP Pack] Pack process completed successfully!")
+    print(f"[BBP Pack] Output directory: {target_path}")
     
     # Determine file path for submission
     file_path = None
@@ -1865,41 +1865,41 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         # For pack-and-save, return the main target blend file
         if top_level_target_blend and top_level_target_blend.exists():
             file_path = top_level_target_blend
-            print(f"[SheepIt Pack] Target blend file for submission: {file_path}")
+            print(f"[BBP Pack] Target blend file for submission: {file_path}")
         else:
             # Fallback: find the first .blend file in target_path
             blend_files = list(target_path.rglob("*.blend"))
             if blend_files:
                 file_path = blend_files[0]
-                print(f"[SheepIt Pack] Found blend file for submission: {file_path}")
+                print(f"[BBP Pack] Found blend file for submission: {file_path}")
     
     return target_path, file_path
 
 
-class SHEEPIT_OT_pack_zip(Operator):
+class BBP_OT_pack_zip(Operator):
     """Pack project as ZIP (for scenes with caches) - creates ZIP and saves to output location."""
-    bl_idname = "sheepit.pack_zip"
+    bl_idname = "bbp.pack_zip"
     bl_label = "Pack as ZIP"
     bl_description = "Copy assets without packing (for scenes with caches), create ZIP, and save to output location"
     bl_options = {'REGISTER', 'UNDO'}
     
     def invoke(self, context, event):
         """Start the packing operation."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Check if already packing
-        if submit_settings.is_submitting:
+        if pack_settings.is_packing:
             self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
         # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
+        output_dir = pack_settings.output_path
         if not output_dir:
             from ..utils.compat import get_addon_prefs
             prefs = get_addon_prefs()
             if prefs and prefs.default_output_path:
                 output_dir = prefs.default_output_path
-                submit_settings.output_path = output_dir
+                pack_settings.output_path = output_dir
         
         if not output_dir:
             self.report({'ERROR'}, "Please specify an output path in the panel below.")
@@ -1915,9 +1915,9 @@ class SHEEPIT_OT_pack_zip(Operator):
         self._output_dir = Path(output_dir)
         
         # Initialize progress properties
-        submit_settings.is_submitting = True
-        submit_settings.submit_progress = 0.0
-        submit_settings.submit_status_message = "Initializing..."
+        pack_settings.is_packing = True
+        pack_settings.pack_progress = 0.0
+        pack_settings.pack_status_message = "Initializing..."
         
         # Initialize phase tracking
         self._phase = 'INIT'
@@ -1953,15 +1953,15 @@ class SHEEPIT_OT_pack_zip(Operator):
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Debug: Log all events (but filter out noisy ones)
         if event.type not in ('TIMER', 'MOUSEMOVE', 'WINDOW_DEACTIVATE'):
-            print(f"[SheepIt Pack] DEBUG: Modal event received: type={event.type}, value={getattr(event, 'value', 'N/A')}")
+            print(f"[BBP Pack] DEBUG: Modal event received: type={event.type}, value={getattr(event, 'value', 'N/A')}")
         
         # Handle ESC key to cancel
         if event.type == 'ESC':
-            print(f"[SheepIt Pack] DEBUG: ESC key pressed, cancelling")
+            print(f"[BBP Pack] DEBUG: ESC key pressed, cancelling")
             self._cleanup(context, cancelled=True)
             self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
@@ -1969,32 +1969,32 @@ class SHEEPIT_OT_pack_zip(Operator):
         # Handle timer events
         if event.type == 'TIMER':
             try:
-                print(f"[SheepIt Pack] DEBUG: Modal timer event, current phase: {self._phase}")
+                print(f"[BBP Pack] DEBUG: Modal timer event, current phase: {self._phase}")
                 
                 if self._phase == 'INIT':
-                    print(f"[SheepIt Pack] DEBUG: Entering INIT phase")
-                    submit_settings.submit_progress = 0.0
-                    submit_settings.submit_status_message = "Initializing..."
+                    print(f"[BBP Pack] DEBUG: Entering INIT phase")
+                    pack_settings.pack_progress = 0.0
+                    pack_settings.pack_status_message = "Initializing..."
                     self._phase = 'SAVING_BLEND'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to SAVING_BLEND phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to SAVING_BLEND phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_BLEND':
-                    print(f"[SheepIt Pack] DEBUG: Entering SAVING_BLEND phase")
-                    submit_settings.submit_progress = 5.0
-                    submit_settings.submit_status_message = "Saving current blend state..."
+                    print(f"[BBP Pack] DEBUG: Entering SAVING_BLEND phase")
+                    pack_settings.pack_progress = 5.0
+                    pack_settings.pack_status_message = "Saving current blend state..."
                     
-                    from .submit_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
+                    from .export_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
                     
-                    print(f"[SheepIt Pack] DEBUG: About to call save_current_blend_with_frame_range")
+                    print(f"[BBP Pack] DEBUG: About to call save_current_blend_with_frame_range")
                     try:
-                        self._temp_blend_path, self._frame_start, self._frame_end, self._frame_step = save_current_blend_with_frame_range(submit_settings)
+                        self._temp_blend_path, self._frame_start, self._frame_end, self._frame_step = save_current_blend_with_frame_range(pack_settings)
                         self._temp_dir = self._temp_blend_path.parent
-                        print(f"[SheepIt Pack] DEBUG: save_current_blend_with_frame_range completed")
-                        print(f"[SheepIt Pack] Saved to temp file: {self._temp_blend_path}")
-                        print(f"[SheepIt Pack] DEBUG: Frame range: {self._frame_start}-{self._frame_end} (step: {self._frame_step})")
+                        print(f"[BBP Pack] DEBUG: save_current_blend_with_frame_range completed")
+                        print(f"[BBP Pack] Saved to temp file: {self._temp_blend_path}")
+                        print(f"[BBP Pack] DEBUG: Frame range: {self._frame_start}-{self._frame_end} (step: {self._frame_step})")
                     except Exception as e:
-                        print(f"[SheepIt Pack] DEBUG: ERROR in SAVING_BLEND: {type(e).__name__}: {str(e)}")
+                        print(f"[BBP Pack] DEBUG: ERROR in SAVING_BLEND: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"Failed to save current blend state: {str(e)}"
@@ -2003,25 +2003,25 @@ class SHEEPIT_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                     
                     self._phase = 'APPLYING_FRAME_RANGE'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE':
-                    print(f"[SheepIt Pack] DEBUG: Entering APPLYING_FRAME_RANGE phase")
-                    submit_settings.submit_progress = 10.0
-                    submit_settings.submit_status_message = "Frame range applied."
+                    print(f"[BBP Pack] DEBUG: Entering APPLYING_FRAME_RANGE phase")
+                    pack_settings.pack_progress = 10.0
+                    pack_settings.pack_status_message = "Frame range applied."
                     # Frame range is already applied in save_current_blend_with_frame_range
                     self._phase = 'OVERRIDING_FILEPATH'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to OVERRIDING_FILEPATH phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to OVERRIDING_FILEPATH phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'OVERRIDING_FILEPATH':
-                    print(f"[SheepIt Pack] DEBUG: Entering OVERRIDING_FILEPATH phase")
-                    submit_settings.submit_progress = 12.0
-                    submit_settings.submit_status_message = "Preparing for packing..."
+                    print(f"[BBP Pack] DEBUG: Entering OVERRIDING_FILEPATH phase")
+                    pack_settings.pack_progress = 12.0
+                    pack_settings.pack_status_message = "Preparing for packing..."
                     
-                    print(f"[SheepIt Pack] DEBUG: Temp file exists: {self._temp_blend_path.exists() if self._temp_blend_path else 'N/A'}")
-                    print(f"[SheepIt Pack] DEBUG: Current bpy.data.filepath: {bpy.data.filepath}")
+                    print(f"[BBP Pack] DEBUG: Temp file exists: {self._temp_blend_path.exists() if self._temp_blend_path else 'N/A'}")
+                    print(f"[BBP Pack] DEBUG: Current bpy.data.filepath: {bpy.data.filepath}")
                     
                     # Temporarily override library_abspath to use temp file instead of opening it
                     # This avoids invalidating the operator instance
@@ -2045,15 +2045,15 @@ class SHEEPIT_OT_pack_zip(Operator):
                     # Re-apply lru_cache decorator behavior by wrapping
                     au.library_abspath = functools.lru_cache(maxsize=None)(override_library_abspath)
                     
-                    print(f"[SheepIt Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
+                    print(f"[BBP Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
                     
                     # Initialize IncrementalPacker
                     def progress_callback(progress_pct, message):
                         """Update progress during packing."""
                         # Map packer progress (0-100%) to operator progress (15-61%)
-                        submit_settings.submit_progress = 15.0 + (progress_pct * 0.46)
-                        submit_settings.submit_status_message = message
-                        print(f"[SheepIt Pack] DEBUG: Progress update: {submit_settings.submit_progress:.1f}% - {message}")
+                        pack_settings.pack_progress = 15.0 + (progress_pct * 0.46)
+                        pack_settings.pack_status_message = message
+                        print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2061,7 +2061,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                     
                     def cancel_check():
                         """Check if user wants to cancel."""
-                        return not submit_settings.is_submitting
+                        return not pack_settings.is_packing
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
                     self._packer = IncrementalPacker(
@@ -2079,7 +2079,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                     )
                     
                     self._phase = 'PACKING_INIT'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to PACKING_INIT phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to PACKING_INIT phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'PACKING_INIT' or self._phase.startswith('PACKING_'):
@@ -2091,9 +2091,9 @@ class SHEEPIT_OT_pack_zip(Operator):
                         if is_complete:
                             # Packing is complete
                             self._target_path = self._packer.target_path
-                            print(f"[SheepIt Pack] DEBUG: Incremental packing completed")
-                            print(f"[SheepIt Pack] Packed to: {self._target_path}")
-                            context.scene.sheepit_submit.pack_output_path = str(self._target_path)
+                            print(f"[BBP Pack] DEBUG: Incremental packing completed")
+                            print(f"[BBP Pack] Packed to: {self._target_path}")
+                            context.scene.bbp_pack.pack_output_path = str(self._target_path)
                             
                             # Check for oversized files that couldn't be packed
                             if self._packer.oversized_files_all:
@@ -2107,25 +2107,25 @@ class SHEEPIT_OT_pack_zip(Operator):
                                     "Blender cannot pack linked files over the project size limit. These files will remain as external references.\n"
                                     "To fix: Reduce the size of these files or split them into smaller files."
                                 )
-                                print(f"[SheepIt Pack] {warning_msg}")
+                                print(f"[BBP Pack] {warning_msg}")
                                 # Report as warning (non-blocking)
                                 self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
                             self._phase = 'APPLYING_FRAME_RANGE_TO_PACKED'
-                            print(f"[SheepIt Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
+                            print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
-                            print(f"[SheepIt Pack] DEBUG: Packing phase: {self._phase}, continuing...")
+                            print(f"[BBP Pack] DEBUG: Packing phase: {self._phase}, continuing...")
                         
                         return {'RUNNING_MODAL'}
                     except InterruptedError as e:
-                        print(f"[SheepIt Pack] DEBUG: Packing cancelled by user")
+                        print(f"[BBP Pack] DEBUG: Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[SheepIt Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
+                        print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"Packing failed: {str(e)}"
@@ -2134,47 +2134,47 @@ class SHEEPIT_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_PACKED':
-                    print(f"[SheepIt Pack] DEBUG: Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
-                    submit_settings.submit_progress = 60.0
-                    submit_settings.submit_status_message = "Applying frame range to target blend..."
+                    print(f"[BBP Pack] DEBUG: Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
+                    pack_settings.pack_progress = 60.0
+                    pack_settings.pack_status_message = "Applying frame range to target blend..."
                     
-                    from .submit_ops import apply_frame_range_to_blend
+                    from .export_ops import apply_frame_range_to_blend
                     
                     # Apply frame range only to the target (top-level) blend, not dependent blends
                     target_blend = self._packer.top_level_target_blend if self._packer else None
                     if target_blend and target_blend.exists():
-                        print(f"[SheepIt Pack] DEBUG: Applying frame range to target blend: {target_blend.name}")
+                        print(f"[BBP Pack] DEBUG: Applying frame range to target blend: {target_blend.name}")
                         apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
                                 area.tag_redraw()
                     else:
-                        print(f"[SheepIt Pack] DEBUG: No target blend to apply frame range to")
+                        print(f"[BBP Pack] DEBUG: No target blend to apply frame range to")
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to RESTORING_LIBRARY_ABSPATH phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to RESTORING_LIBRARY_ABSPATH phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'RESTORING_LIBRARY_ABSPATH':
-                    print(f"[SheepIt Pack] DEBUG: Entering RESTORING_LIBRARY_ABSPATH phase")
-                    submit_settings.submit_progress = 62.0
-                    submit_settings.submit_status_message = "Restoring file paths..."
+                    print(f"[BBP Pack] DEBUG: Entering RESTORING_LIBRARY_ABSPATH phase")
+                    pack_settings.pack_progress = 62.0
+                    pack_settings.pack_status_message = "Restoring file paths..."
                     
                     # Restore original library_abspath function
                     if hasattr(self, '_original_library_abspath'):
                         au = _get_asset_usage_module()
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
-                        print(f"[SheepIt Pack] DEBUG: Restored original library_abspath function")
+                        print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
                     
                     self._phase = 'VALIDATING_FILE_SIZE'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to VALIDATING_FILE_SIZE phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to VALIDATING_FILE_SIZE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_FILE_SIZE':
-                    print(f"[SheepIt Pack] DEBUG: Entering VALIDATING_FILE_SIZE phase (before ZIP)")
-                    submit_settings.submit_progress = 64.0
-                    submit_settings.submit_status_message = "Validating file size..."
+                    print(f"[BBP Pack] DEBUG: Entering VALIDATING_FILE_SIZE phase (before ZIP)")
+                    pack_settings.pack_progress = 64.0
+                    pack_settings.pack_status_message = "Validating file size..."
                     
                     # Estimate packed directory size
                     total_size = 0
@@ -2187,7 +2187,7 @@ class SHEEPIT_OT_pack_zip(Operator):
                                 file_count += 1
                     
                     total_size_gb = total_size / (1024 * 1024 * 1024)
-                    print(f"[SheepIt Pack] Estimated packed directory size: {total_size_gb:.2f} GB ({file_count} files)")
+                    print(f"[BBP Pack] Estimated packed directory size: {total_size_gb:.2f} GB ({file_count} files)")
                     max_bytes = _get_project_size_limit_bytes(context)
                     if max_bytes is not None and total_size > max_bytes:
                         limit_gb = max_bytes / (1024 * 1024 * 1024)
@@ -2200,34 +2200,34 @@ class SHEEPIT_OT_pack_zip(Operator):
                             "- Truncating caches to match your selected frame range\n"
                             "  (Note: Caches are automatically truncated to your selected frame range during packing)"
                         )
-                        print(f"[SheepIt Pack] ERROR: {error_msg}")
+                        print(f"[BBP Pack] ERROR: {error_msg}")
                         self._error = error_msg
                         self._cleanup(context, cancelled=True)
                         self.report({'ERROR'}, self._error)
                         return {'CANCELLED'}
                     
                     self._phase = 'CREATING_ZIP'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to CREATING_ZIP phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to CREATING_ZIP phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CREATING_ZIP':
-                    print(f"[SheepIt Pack] DEBUG: Entering CREATING_ZIP phase")
-                    submit_settings.submit_progress = 65.0
-                    submit_settings.submit_status_message = "Creating ZIP archive..."
+                    print(f"[BBP Pack] DEBUG: Entering CREATING_ZIP phase")
+                    pack_settings.pack_progress = 65.0
+                    pack_settings.pack_status_message = "Creating ZIP archive..."
                     
-                    from .submit_ops import create_zip_from_directory
+                    from .export_ops import create_zip_from_directory
                     
                     self._zip_path = self._target_path.parent / f"{self._target_path.name}.zip"
-                    print(f"[SheepIt Pack] DEBUG: Creating ZIP: {self._zip_path}")
-                    print(f"[SheepIt Pack] DEBUG: Source directory: {self._target_path}")
+                    print(f"[BBP Pack] DEBUG: Creating ZIP: {self._zip_path}")
+                    print(f"[BBP Pack] DEBUG: Source directory: {self._target_path}")
                     
                     # Create progress callback for ZIP creation
                     def zip_progress_callback(progress_pct, message):
                         """Update progress during ZIP creation."""
                         # Map 0-100% to 65-80% range
-                        submit_settings.submit_progress = 65.0 + (progress_pct * 0.15)
-                        submit_settings.submit_status_message = message
-                        print(f"[SheepIt Pack] DEBUG: ZIP progress: {submit_settings.submit_progress:.1f}% - {message}")
+                        pack_settings.pack_progress = 65.0 + (progress_pct * 0.15)
+                        pack_settings.pack_status_message = message
+                        print(f"[BBP Pack] DEBUG: ZIP progress: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2235,10 +2235,10 @@ class SHEEPIT_OT_pack_zip(Operator):
                     
                     def zip_cancel_check():
                         """Check if user wants to cancel."""
-                        return not submit_settings.is_submitting
+                        return not pack_settings.is_packing
                     
                     try:
-                        exclude_video = getattr(context.scene.sheepit_submit, 'exclude_video_from_zip', False)
+                        exclude_video = getattr(context.scene.bbp_pack, 'exclude_video_from_zip', False)
                         create_zip_from_directory(
                             self._target_path,
                             self._zip_path,
@@ -2262,10 +2262,10 @@ class SHEEPIT_OT_pack_zip(Operator):
                         
                         if desired_zip_path.exists():
                             # File conflict - add suffix with pack indicator
-                            # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "sheepit_pack_0t2v99gf")
+                            # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "bbp_pack_0t2v99gf")
                             pack_indicator = self._target_path.name
-                            if pack_indicator.startswith("sheepit_pack_"):
-                                pack_indicator = pack_indicator[len("sheepit_pack_"):]
+                            if pack_indicator.startswith("bbp_pack_"):
+                                pack_indicator = pack_indicator[len("bbp_pack_"):]
                             
                             # Create new ZIP name with suffix: {blend_name}_{pack_indicator}.zip
                             new_zip_name = f"{blend_name}_{pack_indicator}.zip"
@@ -2279,19 +2279,19 @@ class SHEEPIT_OT_pack_zip(Operator):
                         if self._zip_path.exists():
                             self._zip_path.rename(new_zip_path)
                             self._zip_path = new_zip_path
-                            print(f"[SheepIt Pack] Renamed ZIP to: {new_zip_name}")
+                            print(f"[BBP Pack] Renamed ZIP to: {new_zip_name}")
                         
-                        submit_settings.submit_progress = 80.0
-                        submit_settings.submit_status_message = "ZIP archive created"
-                        print(f"[SheepIt Pack] DEBUG: ZIP creation completed")
-                        print(f"[SheepIt Pack] Creating ZIP: {self._zip_path}")
+                        pack_settings.pack_progress = 80.0
+                        pack_settings.pack_status_message = "ZIP archive created"
+                        print(f"[BBP Pack] DEBUG: ZIP creation completed")
+                        print(f"[BBP Pack] Creating ZIP: {self._zip_path}")
                     except InterruptedError as e:
-                        print(f"[SheepIt Pack] DEBUG: ZIP creation cancelled by user")
+                        print(f"[BBP Pack] DEBUG: ZIP creation cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "ZIP creation cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[SheepIt Pack] DEBUG: ERROR creating ZIP: {type(e).__name__}: {str(e)}")
+                        print(f"[BBP Pack] DEBUG: ERROR creating ZIP: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"ZIP creation failed: {str(e)}"
@@ -2300,19 +2300,19 @@ class SHEEPIT_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                     
                     self._phase = 'VALIDATING_ZIP_SIZE'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to VALIDATING_ZIP_SIZE phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to VALIDATING_ZIP_SIZE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_ZIP_SIZE':
-                    print(f"[SheepIt Pack] DEBUG: Entering VALIDATING_ZIP_SIZE phase")
-                    submit_settings.submit_progress = 80.5
-                    submit_settings.submit_status_message = "Validating ZIP size..."
+                    print(f"[BBP Pack] DEBUG: Entering VALIDATING_ZIP_SIZE phase")
+                    pack_settings.pack_progress = 80.5
+                    pack_settings.pack_status_message = "Validating ZIP size..."
                     
                     # Check final ZIP size
                     if self._zip_path and self._zip_path.exists():
                         zip_size = self._zip_path.stat().st_size
                         zip_size_gb = zip_size / (1024 * 1024 * 1024)
-                        print(f"[SheepIt Pack] Final ZIP size: {zip_size_gb:.2f} GB")
+                        print(f"[BBP Pack] Final ZIP size: {zip_size_gb:.2f} GB")
                         max_bytes = _get_project_size_limit_bytes(context)
                         if max_bytes is not None and zip_size > max_bytes:
                             limit_gb = max_bytes / (1024 * 1024 * 1024)
@@ -2325,19 +2325,19 @@ class SHEEPIT_OT_pack_zip(Operator):
                                 "- Truncating caches to match your selected frame range\n"
                                 "  (Note: Caches are automatically truncated to your selected frame range during packing)"
                             )
-                            print(f"[SheepIt Pack] ERROR: {error_msg}")
+                            print(f"[BBP Pack] ERROR: {error_msg}")
                             self._error = error_msg
                             self._cleanup(context, cancelled=True)
                             self.report({'ERROR'}, self._error)
                             return {'CANCELLED'}
                     
                     self._phase = 'SAVING_FILE'
-                    print(f"[SheepIt Pack] DEBUG: Transitioning to SAVING_FILE phase")
+                    print(f"[BBP Pack] DEBUG: Transitioning to SAVING_FILE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_FILE':
-                    submit_settings.submit_progress = 85.0
-                    submit_settings.submit_status_message = "Saving ZIP to output location..."
+                    pack_settings.pack_progress = 85.0
+                    pack_settings.pack_status_message = "Saving ZIP to output location..."
                     
                     try:
                         # Ensure output directory exists
@@ -2350,12 +2350,12 @@ class SHEEPIT_OT_pack_zip(Operator):
                         self._zip_path = final_zip_path
                         self._output_path = final_zip_path
                         
-                        print(f"[SheepIt Pack] Saved ZIP file to: {self._output_path}")
+                        print(f"[BBP Pack] Saved ZIP file to: {self._output_path}")
                         self._success = True
                         self._message = f"ZIP file saved to: {self._output_path}"
                         
-                        submit_settings.submit_progress = 95.0
-                        submit_settings.submit_status_message = "File saved successfully!"
+                        pack_settings.pack_progress = 95.0
+                        pack_settings.pack_status_message = "File saved successfully!"
                         self._phase = 'CLEANUP'
                     except Exception as e:
                         self._error = f"Failed to save file: {str(e)}"
@@ -2366,8 +2366,8 @@ class SHEEPIT_OT_pack_zip(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CLEANUP':
-                    submit_settings.submit_progress = 98.0
-                    submit_settings.submit_status_message = "Cleaning up..."
+                    pack_settings.pack_progress = 98.0
+                    pack_settings.pack_status_message = "Cleaning up..."
                     
                     # Clean up temp file on success
                     if self._temp_blend_path and self._temp_blend_path.exists():
@@ -2378,16 +2378,16 @@ class SHEEPIT_OT_pack_zip(Operator):
                                     self._temp_dir.rmdir()
                                 except Exception:
                                     pass  # Directory may not be empty
-                            print(f"[SheepIt Pack] Cleaned up temp file: {self._temp_blend_path}")
+                            print(f"[BBP Pack] Cleaned up temp file: {self._temp_blend_path}")
                         except Exception as e:
-                            print(f"[SheepIt Pack] WARNING: Could not clean up temp file: {e}")
+                            print(f"[BBP Pack] WARNING: Could not clean up temp file: {e}")
                     
                     self._phase = 'COMPLETE'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'COMPLETE':
-                    submit_settings.submit_progress = 100.0
-                    submit_settings.submit_status_message = "Packing complete!"
+                    pack_settings.pack_progress = 100.0
+                    pack_settings.pack_status_message = "Packing complete!"
                     
                     # Small delay to show completion
                     import time
@@ -2409,7 +2409,7 @@ class SHEEPIT_OT_pack_zip(Operator):
     
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
@@ -2417,21 +2417,21 @@ class SHEEPIT_OT_pack_zip(Operator):
                 au = _get_asset_usage_module()
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
-                print(f"[SheepIt Pack] DEBUG: Restored original library_abspath in cleanup")
+                print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
             except Exception as e:
-                print(f"[SheepIt Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
+                print(f"[BBP Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
         
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
             context.window_manager.event_timer_remove(self._timer)
         
         # Reset progress properties
-        submit_settings.is_submitting = False
-        submit_settings.submit_progress = 0.0
+        pack_settings.is_packing = False
+        pack_settings.pack_progress = 0.0
         if cancelled and self._error:
-            submit_settings.submit_status_message = self._error
+            pack_settings.pack_status_message = self._error
         else:
-            submit_settings.submit_status_message = ""
+            pack_settings.pack_status_message = ""
         
         # Force UI redraw
         for area in context.screen.areas:
@@ -2443,30 +2443,30 @@ class SHEEPIT_OT_pack_zip(Operator):
         return self.invoke(context, None)
 
 
-class SHEEPIT_OT_pack_blend(Operator):
+class BBP_OT_pack_blend(Operator):
     """Pack project and save (pack all assets into blend files) - saves blend to output location."""
-    bl_idname = "sheepit.pack_blend"
+    bl_idname = "bbp.pack_blend"
     bl_label = "Pack as Blend"
     bl_description = "Pack all assets into blend files and save to output location"
     bl_options = {'REGISTER', 'UNDO'}
     
     def invoke(self, context, event):
         """Start the packing operation."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Check if already packing
-        if submit_settings.is_submitting:
+        if pack_settings.is_packing:
             self.report({'WARNING'}, "A packing operation is already in progress.")
             return {'CANCELLED'}
         
         # Get output path from settings or preferences
-        output_dir = submit_settings.output_path
+        output_dir = pack_settings.output_path
         if not output_dir:
             from ..utils.compat import get_addon_prefs
             prefs = get_addon_prefs()
             if prefs and prefs.default_output_path:
                 output_dir = prefs.default_output_path
-                submit_settings.output_path = output_dir
+                pack_settings.output_path = output_dir
         
         if not output_dir:
             self.report({'ERROR'}, "Please specify an output path in the panel below.")
@@ -2481,9 +2481,9 @@ class SHEEPIT_OT_pack_blend(Operator):
         output_file = Path(output_dir) / f"{blend_name}.blend"
         
         # Initialize progress properties
-        submit_settings.is_submitting = True
-        submit_settings.submit_progress = 0.0
-        submit_settings.submit_status_message = "Initializing..."
+        pack_settings.is_packing = True
+        pack_settings.pack_progress = 0.0
+        pack_settings.pack_status_message = "Initializing..."
         
         # Initialize phase tracking
         self._phase = 'INIT'
@@ -2519,7 +2519,7 @@ class SHEEPIT_OT_pack_blend(Operator):
     
     def modal(self, context, event):
         """Handle modal events and update progress."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Handle ESC key to cancel
         if event.type == 'ESC':
@@ -2531,21 +2531,21 @@ class SHEEPIT_OT_pack_blend(Operator):
         if event.type == 'TIMER':
             try:
                 if self._phase == 'INIT':
-                    submit_settings.submit_progress = 0.0
-                    submit_settings.submit_status_message = "Initializing..."
+                    pack_settings.pack_progress = 0.0
+                    pack_settings.pack_status_message = "Initializing..."
                     self._phase = 'SAVING_BLEND'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_BLEND':
-                    submit_settings.submit_progress = 5.0
-                    submit_settings.submit_status_message = "Saving current blend state..."
+                    pack_settings.pack_progress = 5.0
+                    pack_settings.pack_status_message = "Saving current blend state..."
                     
-                    from .submit_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
+                    from .export_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
                     
                     try:
-                        self._temp_blend_path, self._frame_start, self._frame_end, self._frame_step = save_current_blend_with_frame_range(submit_settings)
+                        self._temp_blend_path, self._frame_start, self._frame_end, self._frame_step = save_current_blend_with_frame_range(pack_settings)
                         self._temp_dir = self._temp_blend_path.parent
-                        print(f"[SheepIt Pack] Saved to temp file: {self._temp_blend_path}")
+                        print(f"[BBP Pack] Saved to temp file: {self._temp_blend_path}")
                     except Exception as e:
                         self._error = f"Failed to save current blend state: {str(e)}"
                         self._cleanup(context, cancelled=True)
@@ -2556,15 +2556,15 @@ class SHEEPIT_OT_pack_blend(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE':
-                    submit_settings.submit_progress = 10.0
-                    submit_settings.submit_status_message = "Frame range applied."
+                    pack_settings.pack_progress = 10.0
+                    pack_settings.pack_status_message = "Frame range applied."
                     # Frame range is already applied in save_current_blend_with_frame_range
                     self._phase = 'OVERRIDING_FILEPATH'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'OVERRIDING_FILEPATH':
-                    submit_settings.submit_progress = 12.0
-                    submit_settings.submit_status_message = "Preparing for packing..."
+                    pack_settings.pack_progress = 12.0
+                    pack_settings.pack_status_message = "Preparing for packing..."
                     
                     # Temporarily override library_abspath to use temp file instead of opening it
                     # This avoids invalidating the operator instance
@@ -2588,15 +2588,15 @@ class SHEEPIT_OT_pack_blend(Operator):
                     # Re-apply lru_cache decorator behavior by wrapping
                     au.library_abspath = functools.lru_cache(maxsize=None)(override_library_abspath)
                     
-                    print(f"[SheepIt Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
+                    print(f"[BBP Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
                     
                     # Initialize IncrementalPacker
                     def progress_callback(progress_pct, message):
                         """Update progress during packing."""
                         # Map packer progress (0-100%) to operator progress (15-70%)
-                        submit_settings.submit_progress = 15.0 + (progress_pct * 0.55)
-                        submit_settings.submit_status_message = message
-                        print(f"[SheepIt Pack] DEBUG: Progress update: {submit_settings.submit_progress:.1f}% - {message}")
+                        pack_settings.pack_progress = 15.0 + (progress_pct * 0.55)
+                        pack_settings.pack_status_message = message
+                        print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2604,7 +2604,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                     
                     def cancel_check():
                         """Check if user wants to cancel."""
-                        return not submit_settings.is_submitting
+                        return not pack_settings.is_packing
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
                     self._packer = IncrementalPacker(
@@ -2634,9 +2634,9 @@ class SHEEPIT_OT_pack_blend(Operator):
                             # Packing is complete
                             self._target_path = self._packer.target_path
                             self._blend_path = self._packer.file_path
-                            print(f"[SheepIt Pack] DEBUG: Incremental packing completed")
-                            print(f"[SheepIt Pack] Packed to: {self._target_path}")
-                            context.scene.sheepit_submit.pack_output_path = str(self._target_path)
+                            print(f"[BBP Pack] DEBUG: Incremental packing completed")
+                            print(f"[BBP Pack] Packed to: {self._target_path}")
+                            context.scene.bbp_pack.pack_output_path = str(self._target_path)
                             
                             # Check for oversized files that couldn't be packed
                             if self._packer.oversized_files_all:
@@ -2650,7 +2650,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                                     "Blender cannot pack linked files over the project size limit. These files will remain as external references.\n"
                                     "To fix: Reduce the size of these files or split them into smaller files."
                                 )
-                                print(f"[SheepIt Pack] {warning_msg}")
+                                print(f"[BBP Pack] {warning_msg}")
                                 # Report as warning (non-blocking)
                                 self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
@@ -2661,20 +2661,20 @@ class SHEEPIT_OT_pack_blend(Operator):
                                 return {'CANCELLED'}
                             
                             self._phase = 'APPLYING_FRAME_RANGE_TO_TARGET'
-                            print(f"[SheepIt Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_TARGET phase")
+                            print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_TARGET phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
-                            print(f"[SheepIt Pack] DEBUG: Packing phase: {self._phase}, continuing...")
+                            print(f"[BBP Pack] DEBUG: Packing phase: {self._phase}, continuing...")
                         
                         return {'RUNNING_MODAL'}
                     except InterruptedError as e:
-                        print(f"[SheepIt Pack] DEBUG: Packing cancelled by user")
+                        print(f"[BBP Pack] DEBUG: Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[SheepIt Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
+                        print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"Packing failed: {str(e)}"
@@ -2683,35 +2683,35 @@ class SHEEPIT_OT_pack_blend(Operator):
                         return {'CANCELLED'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_TARGET':
-                    submit_settings.submit_progress = 70.0
-                    submit_settings.submit_status_message = "Applying frame range to target blend..."
+                    pack_settings.pack_progress = 70.0
+                    pack_settings.pack_status_message = "Applying frame range to target blend..."
                     
-                    from .submit_ops import apply_frame_range_to_blend
+                    from .export_ops import apply_frame_range_to_blend
                     
                     # Apply frame range to the target blend file before submission
-                    print(f"[SheepIt Pack] Applying frame range to target blend file: {self._blend_path.name}")
+                    print(f"[BBP Pack] Applying frame range to target blend file: {self._blend_path.name}")
                     apply_frame_range_to_blend(self._blend_path, self._frame_start, self._frame_end, self._frame_step)
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'RESTORING_LIBRARY_ABSPATH':
-                    submit_settings.submit_progress = 72.0
-                    submit_settings.submit_status_message = "Restoring file paths..."
+                    pack_settings.pack_progress = 72.0
+                    pack_settings.pack_status_message = "Restoring file paths..."
                     
                     # Restore original library_abspath function
                     if hasattr(self, '_original_library_abspath'):
                         au = _get_asset_usage_module()
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
-                        print(f"[SheepIt Pack] DEBUG: Restored original library_abspath function")
+                        print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
                     
                     self._phase = 'VALIDATING_FILE_SIZE'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_FILE_SIZE':
-                    submit_settings.submit_progress = 72.5
-                    submit_settings.submit_status_message = "Validating file size..."
+                    pack_settings.pack_progress = 72.5
+                    pack_settings.pack_status_message = "Validating file size..."
                     
                     # Check blend file size
                     if self._blend_path and self._blend_path.exists():
@@ -2720,7 +2720,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                         max_bytes = _get_project_size_limit_bytes(context)
                         if max_bytes is not None and blend_size > max_bytes:
                             limit_gb = max_bytes / (1024 * 1024 * 1024)
-                            print(f"[SheepIt Pack] Blend file size: {blend_size_gb:.2f} GB")
+                            print(f"[BBP Pack] Blend file size: {blend_size_gb:.2f} GB")
                             error_msg = (
                                 f"Blend file size ({blend_size_gb:.2f} GB) exceeds project limit ({limit_gb:.1f} GB).\n\n"
                                 "To reduce file size, consider:\n"
@@ -2728,7 +2728,7 @@ class SHEEPIT_OT_pack_blend(Operator):
                                 "- Optimizing asset files (compress textures, reduce resolution)\n"
                                 "- Splitting the frame range (render in smaller chunks)"
                             )
-                            print(f"[SheepIt Pack] ERROR: {error_msg}")
+                            print(f"[BBP Pack] ERROR: {error_msg}")
                             self._error = error_msg
                             self._cleanup(context, cancelled=True)
                             self.report({'ERROR'}, self._error)
@@ -2738,8 +2738,8 @@ class SHEEPIT_OT_pack_blend(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_FILE':
-                    submit_settings.submit_progress = 75.0
-                    submit_settings.submit_status_message = "Saving blend file to output location..."
+                    pack_settings.pack_progress = 75.0
+                    pack_settings.pack_status_message = "Saving blend file to output location..."
                     
                     try:
                         # Ensure output directory exists
@@ -2749,12 +2749,12 @@ class SHEEPIT_OT_pack_blend(Operator):
                         import shutil
                         shutil.copy2(self._blend_path, self._output_path)
                         
-                        print(f"[SheepIt Pack] Saved blend file to: {self._output_path}")
+                        print(f"[BBP Pack] Saved blend file to: {self._output_path}")
                         self._success = True
                         self._message = f"Blend file saved to: {self._output_path}"
                         
-                        submit_settings.submit_progress = 90.0
-                        submit_settings.submit_status_message = "File saved successfully!"
+                        pack_settings.pack_progress = 90.0
+                        pack_settings.pack_status_message = "File saved successfully!"
                         self._phase = 'CLEANUP'
                     except Exception as e:
                         self._error = f"Failed to save file: {str(e)}"
@@ -2765,8 +2765,8 @@ class SHEEPIT_OT_pack_blend(Operator):
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CLEANUP':
-                    submit_settings.submit_progress = 98.0
-                    submit_settings.submit_status_message = "Cleaning up..."
+                    pack_settings.pack_progress = 98.0
+                    pack_settings.pack_status_message = "Cleaning up..."
                     
                     # Clean up temp file on success
                     if self._temp_blend_path and self._temp_blend_path.exists():
@@ -2777,16 +2777,16 @@ class SHEEPIT_OT_pack_blend(Operator):
                                     self._temp_dir.rmdir()
                                 except Exception:
                                     pass  # Directory may not be empty
-                            print(f"[SheepIt Pack] Cleaned up temp file: {self._temp_blend_path}")
+                            print(f"[BBP Pack] Cleaned up temp file: {self._temp_blend_path}")
                         except Exception as e:
-                            print(f"[SheepIt Pack] WARNING: Could not clean up temp file: {e}")
+                            print(f"[BBP Pack] WARNING: Could not clean up temp file: {e}")
                     
                     self._phase = 'COMPLETE'
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'COMPLETE':
-                    submit_settings.submit_progress = 100.0
-                    submit_settings.submit_status_message = "Packing complete!"
+                    pack_settings.pack_progress = 100.0
+                    pack_settings.pack_status_message = "Packing complete!"
                     
                     # Small delay to show completion
                     import time
@@ -2808,7 +2808,7 @@ class SHEEPIT_OT_pack_blend(Operator):
     
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
-        submit_settings = context.scene.sheepit_submit
+        pack_settings = context.scene.bbp_pack
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
@@ -2816,21 +2816,21 @@ class SHEEPIT_OT_pack_blend(Operator):
                 au = _get_asset_usage_module()
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
-                print(f"[SheepIt Pack] DEBUG: Restored original library_abspath in cleanup")
+                print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
             except Exception as e:
-                print(f"[SheepIt Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
+                print(f"[BBP Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
         
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
             context.window_manager.event_timer_remove(self._timer)
         
         # Reset progress properties
-        submit_settings.is_submitting = False
-        submit_settings.submit_progress = 0.0
+        pack_settings.is_packing = False
+        pack_settings.pack_progress = 0.0
         if cancelled and self._error:
-            submit_settings.submit_status_message = self._error
+            pack_settings.pack_status_message = self._error
         else:
-            submit_settings.submit_status_message = ""
+            pack_settings.pack_status_message = ""
         
         # Force UI redraw
         for area in context.screen.areas:
@@ -2842,9 +2842,9 @@ class SHEEPIT_OT_pack_blend(Operator):
         return self.invoke(context, None)
 
 
-class SHEEPIT_OT_enable_nla(Operator):
+class BBP_OT_enable_nla(Operator):
     """Enable NLA only on objects/rigs that have Animation Layers turned on (Animation Layers addon)."""
-    bl_idname = "sheepit.enable_nla"
+    bl_idname = "bbp.enable_nla"
     bl_label = "Enable NLA"
     bl_description = "Disable animation layers, remove current action, and enable NLA on objects that have Animation Layers on"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2876,7 +2876,7 @@ class SHEEPIT_OT_enable_nla(Operator):
                     nla_enabled += 1
                 objects_processed += 1
             except Exception as e:
-                print(f"[SheepIt NLA] Warning: Could not process object '{obj.name}': {e}")
+                print(f"[BBP NLA] Warning: Could not process object '{obj.name}': {e}")
         
         if objects_processed > 0:
             self.report({'INFO'},
@@ -2888,14 +2888,14 @@ class SHEEPIT_OT_enable_nla(Operator):
         return {'FINISHED'}
 
 
-class SHEEPIT_OT_pack_zip_sync(Operator):
+class BBP_OT_pack_zip_sync(Operator):
     """Pack project as ZIP synchronously (for scripting/MCP). Same as Pack as ZIP but runs to completion in one call."""
-    bl_idname = "sheepit.pack_zip_sync"
+    bl_idname = "bbp.pack_zip_sync"
     bl_label = "Pack as ZIP (Sync)"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        from .submit_ops import (
+        from .export_ops import (
             save_current_blend_with_frame_range,
             apply_frame_range_to_blend,
             create_zip_from_directory,
@@ -2904,8 +2904,8 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
             from ..utils.compat import get_addon_prefs
         except Exception:
             get_addon_prefs = lambda: None
-        submit_settings = context.scene.sheepit_submit
-        output_dir = submit_settings.output_path
+        pack_settings = context.scene.bbp_pack
+        output_dir = pack_settings.output_path
         if not output_dir:
             prefs = get_addon_prefs()
             if prefs and prefs.default_output_path:
@@ -2913,14 +2913,14 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
         if not output_dir:
             self.report({'ERROR'}, "Please specify an output path.")
             return {'CANCELLED'}
-        submit_settings.is_submitting = True
+        pack_settings.is_packing = True
         output_dir = Path(output_dir)
         original_filepath = bpy.data.filepath
         blend_name = Path(original_filepath).stem if original_filepath else "untitled"
         try:
-            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(submit_settings)
+            temp_blend_path, frame_start, frame_end, frame_step = save_current_blend_with_frame_range(pack_settings)
         except Exception as e:
-            submit_settings.is_submitting = False
+            pack_settings.is_packing = False
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
         au = _get_asset_usage_module()
@@ -2932,8 +2932,8 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
         au.library_abspath.cache_clear()
         au.library_abspath = functools.lru_cache(maxsize=None)(_override)
         def _progress(pct, msg):
-            submit_settings.submit_progress = 15.0 + (pct * 0.46)
-            submit_settings.submit_status_message = msg
+            pack_settings.pack_progress = 15.0 + (pct * 0.46)
+            pack_settings.pack_status_message = msg
         max_size_bytes = _get_project_size_limit_bytes(context)
         packer = IncrementalPacker(
             WorkflowMode.COPY_ONLY,
@@ -2957,7 +2957,7 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
         except Exception as e:
             au.library_abspath.cache_clear()
             au.library_abspath = _orig_lib_abspath
-            submit_settings.is_submitting = False
+            pack_settings.is_packing = False
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
         # Apply frame range only to the target blend, not dependent blends
@@ -2967,13 +2967,13 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
         au.library_abspath.cache_clear()
         au.library_abspath = _orig_lib_abspath
         zip_path = target_path.parent / f"{target_path.name}.zip"
-        exclude_video = getattr(submit_settings, 'exclude_video_from_zip', False)
+        exclude_video = getattr(pack_settings, 'exclude_video_from_zip', False)
         create_zip_from_directory(target_path, zip_path, cancel_check=lambda: False, exclude_video=exclude_video)
         desired_zip_name = f"{blend_name}.zip"
         desired_zip_path = output_dir / desired_zip_name
         pack_indicator = target_path.name
-        if pack_indicator.startswith("sheepit_pack_"):
-            pack_indicator = pack_indicator[len("sheepit_pack_"):]
+        if pack_indicator.startswith("bbp_pack_"):
+            pack_indicator = pack_indicator[len("bbp_pack_"):]
         new_zip_name = f"{blend_name}_{pack_indicator}.zip" if desired_zip_path.exists() else desired_zip_name
         final_zip_path = output_dir / new_zip_name
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -2983,24 +2983,24 @@ class SHEEPIT_OT_pack_zip_sync(Operator):
                 temp_blend_path.unlink()
             except Exception:
                 pass
-        submit_settings.is_submitting = False
-        submit_settings.submit_progress = 100.0
-        submit_settings.submit_status_message = ""
+        pack_settings.is_packing = False
+        pack_settings.pack_progress = 100.0
+        pack_settings.pack_status_message = ""
         self.report({'INFO'}, f"ZIP saved to: {final_zip_path}")
         return {'FINISHED'}
 
 
 def register():
     """Register operators."""
-    bpy.utils.register_class(SHEEPIT_OT_pack_zip)
-    bpy.utils.register_class(SHEEPIT_OT_pack_zip_sync)
-    bpy.utils.register_class(SHEEPIT_OT_pack_blend)
-    bpy.utils.register_class(SHEEPIT_OT_enable_nla)
+    bpy.utils.register_class(BBP_OT_pack_zip)
+    bpy.utils.register_class(BBP_OT_pack_zip_sync)
+    bpy.utils.register_class(BBP_OT_pack_blend)
+    bpy.utils.register_class(BBP_OT_enable_nla)
 
 
 def unregister():
     """Unregister operators."""
-    bpy.utils.unregister_class(SHEEPIT_OT_enable_nla)
-    bpy.utils.unregister_class(SHEEPIT_OT_pack_blend)
-    bpy.utils.unregister_class(SHEEPIT_OT_pack_zip_sync)
-    bpy.utils.unregister_class(SHEEPIT_OT_pack_zip)
+    bpy.utils.unregister_class(BBP_OT_enable_nla)
+    bpy.utils.unregister_class(BBP_OT_pack_blend)
+    bpy.utils.unregister_class(BBP_OT_pack_zip_sync)
+    bpy.utils.unregister_class(BBP_OT_pack_zip)

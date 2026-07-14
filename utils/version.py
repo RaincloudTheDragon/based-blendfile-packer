@@ -1,6 +1,6 @@
 """
 Version detection and comparison utilities for multi-version Blender support.
-Supports full SheepIt range: 3.0, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 4.0, 4.1, 4.2, 4.3, 4.4, 4.5, 5.0+
+Supports Blender 3.0 through 5.0+
 Minimum supported: Blender 3.0
 """
 

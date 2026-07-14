@@ -1,7 +1,7 @@
 """
-SheepIt Project Submitter Addon
+BasedBlendfilePacker Addon
 
-A Blender addon for submitting projects to SheepIt render farm with automatic asset packing.
+A farm-agnostic Blender addon for packing projects with automatic asset discovery and export.
 """
 
 import bpy
@@ -21,11 +21,9 @@ def _update_output_path(self, context):
             self.output_path = prefs.default_output_path
 
 
-# SheepIt Submit Settings Property Group
-class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
-    """Property group for storing submit settings."""
-    
-    # Frame range mode
+class BBP_PG_pack_settings(bpy.types.PropertyGroup):
+    """Property group for blend packing settings."""
+
     frame_range_mode: bpy.props.EnumProperty(
         name="Frame Range Mode",
         description="Choose between full range or custom frame range",
@@ -35,75 +33,34 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         ],
         default='FULL',
     )
-    
-    # Custom frame range
+
     frame_start: bpy.props.IntProperty(
         name="Start Frame",
         description="Start frame for rendering",
         default=1,
         min=0,
     )
-    
+
     frame_end: bpy.props.IntProperty(
         name="End Frame",
         description="End frame for rendering",
         default=250,
         min=0,
     )
-    
+
     frame_step: bpy.props.IntProperty(
         name="Frame Step",
         description="Frame step (render every Nth frame)",
         default=1,
         min=1,
     )
-    
-    # Compute method
-    compute_method: bpy.props.EnumProperty(
-        name="Compute Method",
-        description="Choose CPU or GPU rendering",
-        items=[
-            ('CPU', "CPU", "Use CPU for rendering"),
-            ('GPU', "GPU", "Use GPU for rendering"),
-        ],
-        default='CPU',
-    )
-    
-    # Checkboxes
-    renderable_by_all: bpy.props.BoolProperty(
-        name="Renderable by all members",
-        description="Allow all SheepIt members to render this project",
-        default=True,
-    )
-    
-    generate_mp4: bpy.props.BoolProperty(
-        name="Generate MP4 video",
-        description="Generate MP4 video from rendered frames",
-        default=False,
-    )
-    
-    # Advanced options
-    memory_used_mb: bpy.props.StringProperty(
-        name="Memory used (MB)",
-        description="Memory limit in MB (leave empty for default)",
-        default="",
-    )
-    
-    # Advanced options visibility
-    show_advanced: bpy.props.BoolProperty(
-        name="Show Advanced Options",
-        description="Show advanced submission options",
-        default=False,
-    )
-    
-    # ZIP pack: exclude video/audio files
+
     exclude_video_from_zip: bpy.props.BoolProperty(
         name="Exclude video/audio from ZIP",
         description="Exclude video and audio files (e.g. mp4, avi, mov, wav, mp3) from the ZIP pack",
         default=False,
     )
-    
-    # Project size limit (GB); 0 = no limit (max 32-bit signed int for Blender C API)
+
     project_size_limit_gb: bpy.props.IntProperty(
         name="Project Size Limit (GB)",
         description="Maximum project/ZIP/blend size in GB (0 = no limit)",
@@ -111,21 +68,20 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         min=0,
         max=(1 << 31) - 1,
     )
-    
-    # Pack output path (set by pack operators)
+
     pack_output_path: bpy.props.StringProperty(
         name="Pack Output Path",
         description="Path to the packed output directory",
         default="",
     )
-    
+
     output_file_path: bpy.props.StringProperty(
         name="Output File Path",
         description="Path where the packed file (ZIP or blend) will be saved",
         default="",
         subtype='FILE_PATH',
     )
-    
+
     output_path: bpy.props.StringProperty(
         name="Output Path",
         description="Directory path where packed files will be saved",
@@ -133,26 +89,25 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
         subtype='DIR_PATH',
         update=_update_output_path,
     )
-    
-    # Progress tracking for submission operations
-    is_submitting: bpy.props.BoolProperty(
-        name="Is Submitting",
-        description="Whether a submission is currently in progress",
+
+    is_packing: bpy.props.BoolProperty(
+        name="Is Packing",
+        description="Whether a packing operation is currently in progress",
         default=False,
     )
-    
-    submit_progress: bpy.props.FloatProperty(
-        name="Submit Progress",
-        description="Progress percentage for submission operations",
+
+    pack_progress: bpy.props.FloatProperty(
+        name="Pack Progress",
+        description="Progress percentage for packing operations",
         default=0.0,
         min=0.0,
         max=100.0,
         subtype='PERCENTAGE',
     )
-    
-    submit_status_message: bpy.props.StringProperty(
-        name="Submit Status Message",
-        description="Current status message for submission operations",
+
+    pack_status_message: bpy.props.StringProperty(
+        name="Pack Status Message",
+        description="Current status message for packing operations",
         default="",
     )
 
@@ -160,29 +115,23 @@ class SHEEPIT_PG_submit_settings(bpy.types.PropertyGroup):
 def register():
     """Register the addon."""
     from .utils import compat
-    
-    compat.safe_register_class(SHEEPIT_PG_submit_settings)
-    bpy.types.Scene.sheepit_submit = bpy.props.PointerProperty(type=SHEEPIT_PG_submit_settings)
-    
-    # Register operators and UI (preferences are registered in ui.register())
+
+    compat.safe_register_class(BBP_PG_pack_settings)
+    bpy.types.Scene.bbp_pack = bpy.props.PointerProperty(type=BBP_PG_pack_settings)
+
     ops.register()
     ui.register()
-    
-    # Bootstrap Rainy's Extensions repository
     rainys_repo_bootstrap.register()
 
 
 def unregister():
     """Unregister the addon."""
     from .utils import compat
-    
-    # Bootstrap unregistration
+
     rainys_repo_bootstrap.unregister()
-    
-    # Unregister operators and UI
     ui.unregister()
     ops.unregister()
-    
-    compat.safe_unregister_class(SHEEPIT_PG_submit_settings)
-    if hasattr(bpy.types.Scene, 'sheepit_submit'):
-        del bpy.types.Scene.sheepit_submit
+
+    compat.safe_unregister_class(BBP_PG_pack_settings)
+    if hasattr(bpy.types.Scene, 'bbp_pack'):
+        del bpy.types.Scene.bbp_pack

@@ -1,5 +1,5 @@
 """
-Output panel UI for SheepIt Project Submitter.
+Output panel UI for BasedBlendfilePacker.
 Located in the Output tab, similar to Flamenco addon.
 """
 
@@ -8,83 +8,72 @@ from bpy.types import Panel
 from ..utils import compat
 
 
-class SHEEPIT_PT_output_panel(Panel):
-    """SheepIt submission panel in Output properties."""
-    bl_label = "SheepIt Render Farm"
-    bl_idname = "SHEEPIT_PT_output_panel"
+class BBP_PT_output_panel(Panel):
+    """Blend packing panel in Output properties."""
+    bl_label = "BasedBlendfilePacker"
+    bl_idname = "BBP_PT_output_panel"
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "output"
-    
+
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        submit_settings = scene.sheepit_submit
-        # Do not write to scene in draw(); operators fall back to prefs.default_output_path when output_path is empty.
+        pack_settings = scene.bbp_pack
 
-        # Animation Setup Section
         box = layout.box()
         box.label(text="Animation Setup:", icon='ACTION')
         col = box.column()
-        col.operator("sheepit.enable_nla", text="Disable Animation Layers", icon='ACTION')
-        
+        col.operator("bbp.enable_nla", text="Disable Animation Layers", icon='ACTION')
+
         layout.separator()
-        
-        # Frame Range Section
+
         box = layout.box()
         box.label(text="Frame Range:", icon='RENDER_ANIMATION')
         row = box.row()
-        row.prop(submit_settings, "frame_range_mode", expand=True)
-        
-        if submit_settings.frame_range_mode == 'CUSTOM':
+        row.prop(pack_settings, "frame_range_mode", expand=True)
+
+        if pack_settings.frame_range_mode == 'CUSTOM':
             col = box.column(align=True)
-            col.prop(submit_settings, "frame_start")
-            col.prop(submit_settings, "frame_end")
-            col.prop(submit_settings, "frame_step")
+            col.prop(pack_settings, "frame_start")
+            col.prop(pack_settings, "frame_end")
+            col.prop(pack_settings, "frame_step")
         else:
-            # Show current scene frame range
             row = box.row()
             row.label(text=f"Scene Range: {scene.frame_start} - {scene.frame_end} (Step: {scene.frame_step})")
-        
+
         layout.separator()
-        
-        # Progress Bar Section (when submitting)
-        if submit_settings.is_submitting:
+
+        if pack_settings.is_packing:
             box = layout.box()
-            box.label(text=submit_settings.submit_status_message, icon='TIME')
-            box.prop(submit_settings, "submit_progress", text="Progress", slider=True)
+            box.label(text=pack_settings.pack_status_message, icon='TIME')
+            box.prop(pack_settings, "pack_progress", text="Progress", slider=True)
             layout.separator()
-        
-        # Packing Buttons
+
         col = layout.column()
         col.scale_y = 1.5
-        
-        # Pack Current Blend button (first)
-        op = col.operator("sheepit.submit_current", text="Pack Current Blend", icon='EXPORT')
-        
-        op = col.operator("sheepit.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
+
+        col.operator("bbp.pack_current", text="Pack Current Blend", icon='EXPORT')
+        col.operator("bbp.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
         row = layout.row()
-        row.prop(submit_settings, "exclude_video_from_zip", text="Exclude video/audio from ZIP")
-        
-        # Pack as Blend button
-        op = col.operator("sheepit.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
-        
+        row.prop(pack_settings, "exclude_video_from_zip", text="Exclude video/audio from ZIP")
+        col.operator("bbp.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
+
         layout.separator()
-        
-        # Output Path Section
+
         box = layout.box()
         box.label(text="Output Path:", icon='FILE_FOLDER')
         row = box.row()
-        row.prop(submit_settings, "output_path", text="")
+        row.prop(pack_settings, "output_path", text="")
         row = box.row()
-        row.prop(submit_settings, "project_size_limit_gb", text="Size limit (GB)")
+        row.prop(pack_settings, "project_size_limit_gb", text="Size limit (GB)")
 
 
 def register():
     """Register panel."""
-    compat.safe_register_class(SHEEPIT_PT_output_panel)
+    compat.safe_register_class(BBP_PT_output_panel)
 
 
 def unregister():
     """Unregister panel."""
-    compat.safe_unregister_class(SHEEPIT_PT_output_panel)
+    compat.safe_unregister_class(BBP_PT_output_panel)

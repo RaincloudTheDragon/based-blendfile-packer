@@ -1,5 +1,5 @@
 """
-UI modules for SheepIt Project Submitter addon.
+UI modules for BasedBlendfilePacker addon.
 """
 
 from . import output_panel
@@ -10,10 +10,7 @@ __all__ = ["output_panel", "preferences_ui"]
 
 def register():
     """Register all UI classes."""
-    # Register preferences first so we can access variables in config.py
     preferences_ui.register()
-    
-    # Register other UI components
     output_panel.register()
 
 

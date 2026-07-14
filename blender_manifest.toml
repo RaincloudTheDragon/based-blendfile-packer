@@ -1,18 +1,18 @@
 schema_version = "1.0.0"
 
-id = "sheepit_project_submitter"
-name = "SheepIt Project Submitter"
+id = "based_blendfile_packer"
+name = "BasedBlendfilePacker"
 version = "0.0.8"
 type = "add-on"
 author = "RaincloudTheDragon"
 maintainer = "RaincloudTheDragon"
 blender_version_min = "3.0.0"
 license = ["GPL-3.0-or-later"]
-description = "Submit Blender projects to SheepIt render farm with automatic asset packing."
-homepage = "https://github.com/RaincloudTheDragon/sheepit-project-submitter/"
-tagline = "Submit projects to SheepIt render farm"
+description = "Pack Blender projects with automatic asset discovery, path remapping, and farm-ready export."
+homepage = "https://github.com/RaincloudTheDragon/sheepit_project_submitter/"
+tagline = "Farm-agnostic blendfile packing for any render pipeline"
 
-tags = ["render", "farm", "submission", "utility"]
+tags = ["render", "pack", "utility", "assets"]
 
 # Python modules to load for this add-on
-modules = ["sheepit_project_submitter"]
+modules = ["based_blendfile_packer"]

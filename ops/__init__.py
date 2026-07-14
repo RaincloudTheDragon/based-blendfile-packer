@@ -1,24 +1,21 @@
 """
-Operators for SheepIt Project Submitter addon.
+Operators for BasedBlendfilePacker addon.
 """
 
 
 def register():
     """Register all operators."""
-    # Lazy imports - these are only executed when register() is called
-    # This avoids circular import issues since imports happen at function call time
     from . import pack_ops
-    from . import submit_ops
-    
+    from . import export_ops
+
     pack_ops.register()
-    submit_ops.register()
+    export_ops.register()
 
 
 def unregister():
     """Unregister all operators."""
-    # Lazy imports - these are only executed when unregister() is called
     from . import pack_ops
-    from . import submit_ops
-    
-    submit_ops.unregister()
+    from . import export_ops
+
+    export_ops.unregister()
     pack_ops.unregister()
