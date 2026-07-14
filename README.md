@@ -40,7 +40,10 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 ## Requirements
 
-- Blender 3.0.0 or later
+- **Blender 4.5 LTS** or **Blender 5.2 LTS** (minimum: Blender 4.5.0)
+- Asset tracing uses [Blender Asset Tracer](https://projects.blender.org/blender/blender-asset-tracer):
+  - **4.5 LTS** — BAT v1 (vendored in the extension)
+  - **5.2 LTS** — BAT v2 (bundled wheel)
 
 ## License
 

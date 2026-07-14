@@ -3,8 +3,13 @@ Asset usage discovery via official Blender Asset Tracer (BAT).
 
 Replaces the January 2026 fork of BAT v2 alpha (``batter/asset_usage.py``).
 
-- Blender 5.1+: BAT v2 from the bundled extension wheel.
-- Blender 3.0–5.0: BAT v1 vendored under ``vendor/bat_v1/`` (no wheel conflict).
+Supported Blender targets and BAT backends:
+
+- **4.5 LTS** — BAT v1, vendored under ``vendor/bat_v1/`` (standalone blend parsing).
+- **5.2 LTS** — BAT v2, bundled extension wheel (in-Blender ``file_usage`` API).
+
+Both backends are always shipped: the v2 wheel is only installed on Blender 5.1+
+(Python 3.13), so it cannot conflict with the vendored v1 tree on 4.5 LTS.
 """
 
 from __future__ import annotations
@@ -15,15 +20,17 @@ import importlib.util
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import bpy
-from bpy.types import ID, Library
+from bpy.types import Library
 
 from . import version
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+BatBackend = Literal["v1", "v2"]
 
 _ADDON_ROOT = Path(__file__).resolve().parent.parent
 _BAT_V1_VENDOR = _ADDON_ROOT / "vendor" / "bat_v1"
@@ -55,15 +62,25 @@ class AssetUsage:
         )
 
 
+def get_bat_backend() -> BatBackend:
+    """Return which official BAT backend is active for this Blender session."""
+    return "v2" if uses_bat_v2() else "v1"
+
+
 def uses_bat_v2() -> bool:
-    """True when the official BAT v2 wheel is available (Blender 5.1+)."""
-    if not version.is_version_at_least(5, 1, 0):
+    """True when BAT v2 from the bundled wheel is active (Blender 5.1+ / 5.2 LTS)."""
+    if not version.uses_bat_v2_blender_version():
         return False
     try:
         import blender_asset_tracer.file_usage  # noqa: F401
     except ImportError:
         return False
     return True
+
+
+def uses_bat_v1() -> bool:
+    """True when vendored BAT v1 is the active backend (Blender 4.5 LTS)."""
+    return not uses_bat_v2()
 
 
 def _install_bat_v1_vendor() -> None:
@@ -78,7 +95,10 @@ def _install_bat_v1_vendor() -> None:
 
     package_root = _BAT_V1_VENDOR / "blender_asset_tracer"
     if not package_root.is_dir():
-        raise ImportError(f"Vendored BAT v1 not found at {package_root}")
+        raise ImportError(
+            f"Vendored BAT v1 not found at {package_root}. "
+            "Run the Sync BAT wheels workflow or refresh vendor/bat_v1/."
+        )
 
     py_files = sorted(package_root.rglob("*.py"), key=lambda path: len(path.parts))
     for py_file in py_files:
@@ -190,7 +210,7 @@ def _iter_session_blend_paths() -> Iterable[tuple[Library | None, Path]]:
 
 
 def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
-    """Discover non-blend assets with BAT v1 file tracing."""
+    """Discover non-blend assets with BAT v1 file tracing (4.5 LTS path)."""
     bat_trace = _bat_v1_trace()
     usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
 
@@ -217,7 +237,7 @@ def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
 
 
 def _v2_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
-    """Discover assets with BAT v2 in-Blender dependency tracing."""
+    """Discover assets with BAT v2 in-Blender dependency tracing (5.2 LTS path)."""
     bat_fu = _bat_v2_file_usage()
     repo = bat_fu.dependencies_of_current_blendfile(_project_root())
     all_usages = _repo_to_asset_usages(repo)

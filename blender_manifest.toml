@@ -6,7 +6,7 @@ version = "0.0.8"
 type = "add-on"
 author = "RaincloudTheDragon"
 maintainer = "RaincloudTheDragon"
-blender_version_min = "3.0.0"
+blender_version_min = "4.5.0"
 license = ["GPL-3.0-or-later"]
 description = "Pack Blender projects with automatic asset discovery, path remapping, and farm-ready export."
 homepage = "https://github.com/RaincloudTheDragon/based-blendfile-packer/"
@@ -17,7 +17,7 @@ tags = ["render", "pack", "utility", "assets"]
 # Python modules to load for this add-on
 modules = ["based_blendfile_packer"]
 
-# Blender Asset Tracer v2 wheel (Blender 5.1+). BAT v1 is vendored under vendor/bat_v1/.
+# Blender Asset Tracer: v2 wheel for 5.2 LTS (5.1+); v1 vendored for 4.5 LTS.
 wheels = [
   "./wheels/blender_asset_tracer-2.1.0-py3-none-any.whl",
 ]

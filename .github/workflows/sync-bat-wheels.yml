@@ -96,8 +96,8 @@ jobs:
               )
           else:
               insert = (
-                  "\n# Blender Asset Tracer v2 wheel (Blender 5.1+). "
-                  "BAT v1 is vendored under vendor/bat_v1/.\n"
+                  "\n# Blender Asset Tracer: v2 wheel for 5.2 LTS (5.1+); "
+                  "v1 vendored for 4.5 LTS.\n"
                   f"wheels = [\n{wheel_line}\n]\n"
               )
               text = text.rstrip() + insert

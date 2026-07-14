@@ -1,48 +1,31 @@
 """
-Version detection and comparison utilities for multi-version Blender support.
-Supports Blender 3.0 through 5.0+
-Minimum supported: Blender 3.0
+Version detection and comparison utilities.
+
+Supported targets: Blender 4.5 LTS (BAT v1) and Blender 5.2 LTS (BAT v2).
+Minimum supported version: Blender 4.5.0.
 """
 
 import bpy
 
+from .. import config
+
 
 def get_blender_version():
-    """
-    Returns the current Blender version as a tuple (major, minor, patch).
-    
-    Returns:
-        tuple: (major, minor, patch) version numbers
-    """
+    """Return the current Blender version as ``(major, minor, patch)``."""
     return bpy.app.version
 
 
 def get_version_string():
-    """
-    Returns the current Blender version as a string (e.g., "4.2.0").
-    
-    Returns:
-        str: Version string in format "major.minor.patch"
-    """
+    """Return the current Blender version as a string (e.g. ``4.5.2``)."""
     version = get_blender_version()
     return f"{version[0]}.{version[1]}.{version[2]}"
 
 
 def is_version_at_least(major, minor=0, patch=0):
-    """
-    Check if the current Blender version is at least the specified version.
-    
-    Args:
-        major (int): Major version number
-        minor (int): Minor version number (default: 0)
-        patch (int): Patch version number (default: 0)
-    
-    Returns:
-        bool: True if current version >= specified version
-    """
+    """Return whether the current Blender version is at least the given version."""
     current = get_blender_version()
     target = (major, minor, patch)
-    
+
     if current[0] != target[0]:
         return current[0] > target[0]
     if current[1] != target[1]:
@@ -51,101 +34,50 @@ def is_version_at_least(major, minor=0, patch=0):
 
 
 def is_version_less_than(major, minor=0, patch=0):
-    """
-    Check if the current Blender version is less than the specified version.
-    
-    Args:
-        major (int): Major version number
-        minor (int): Minor version number (default: 0)
-        patch (int): Patch version number (default: 0)
-    
-    Returns:
-        bool: True if current version < specified version
-    """
+    """Return whether the current Blender version is below the given version."""
     return not is_version_at_least(major, minor, patch)
 
 
-def is_version_3_x():
-    """Check if running Blender 3.x."""
-    version = get_blender_version()
-    return version[0] == 3
+def is_supported_version():
+    """Return whether the running Blender version meets the addon minimum."""
+    major, minor, patch = config.MIN_BLENDER_VERSION
+    return is_version_at_least(major, minor, patch)
 
 
-def is_version_4_0():
-    """Check if running Blender 4.0."""
-    return is_version_at_least(4, 0, 0) and is_version_less_than(4, 1, 0)
+def is_version_4_5_lts():
+    """Return whether the running Blender is in the 4.5 LTS line (BAT v1 path)."""
+    return is_version_at_least(4, 5, 0) and is_version_less_than(5, 1, 0)
 
 
-def is_version_4_1():
-    """Check if running Blender 4.1."""
-    return is_version_at_least(4, 1, 0) and is_version_less_than(4, 2, 0)
+def is_version_5_2_lts():
+    """Return whether the running Blender is 5.2+ (primary 5.x LTS target)."""
+    return is_version_at_least(5, 2, 0)
 
 
-def is_version_4_2():
-    """Check if running Blender 4.2 LTS."""
-    version = get_blender_version()
-    return version[0] == 4 and version[1] == 2
-
-
-def is_version_4_3():
-    """Check if running Blender 4.3."""
-    return is_version_at_least(4, 3, 0) and is_version_less_than(4, 4, 0)
-
-
-def is_version_4_4():
-    """Check if running Blender 4.4."""
-    return is_version_at_least(4, 4, 0) and is_version_less_than(4, 5, 0)
-
-
-def is_version_4_5():
-    """Check if running Blender 4.5 LTS."""
-    return is_version_at_least(4, 5, 0) and is_version_less_than(5, 0, 0)
-
-
-def is_version_5_0():
-    """Check if running Blender 5.0.x (before 5.1)."""
-    return is_version_at_least(5, 0, 0) and is_version_less_than(5, 1, 0)
-
-
-def is_version_5_1():
-    """Check if running Blender 5.1 or later."""
-    return is_version_at_least(5, 1, 0)
-
-
-def is_version_5_0_plus():
-    """Check if running Blender 5.0 or later."""
-    return is_version_at_least(5, 0, 0)
+def uses_bat_v2_blender_version():
+    """Return whether this Blender version should load BAT v2 (5.1+)."""
+    major, minor, patch = config.BAT_V2_MIN_BLENDER_VERSION
+    return is_version_at_least(major, minor, patch)
 
 
 def get_version_category():
     """
-    Returns the version category string for the current Blender version.
-    
+    Return a short version label for the current Blender build.
+
     Returns:
-        str: Version category like '3.0', '3.x', '4.0', '4.1', '4.2', '4.3', '4.4', '4.5', or '5.0+'
+        ``4.5`` for the 4.5 LTS line, ``5.2+`` for 5.2 LTS and newer, or
+        ``major.minor`` as a fallback.
     """
     version = get_blender_version()
     major, minor = version[0], version[1]
-    
-    if major == 3:
-        return '3.x'
-    elif major == 4:
-        if minor == 0:
-            return '4.0'
-        elif minor == 1:
-            return '4.1'
-        elif minor == 2:
-            return '4.2'
-        elif minor == 3:
-            return '4.3'
-        elif minor == 4:
-            return '4.4'
-        elif minor >= 5:
-            return '4.5'
-    elif major >= 5:
-        if minor == 0:
-            return '5.0'
-        return '5.1+'
-    
-    # Fallback
+
+    if major == 4 and minor >= 5:
+        return "4.5"
+    if major >= 5:
+        if minor >= 2:
+            return "5.2+"
+        if minor >= 1:
+            return "5.1+"
+        return "5.0"
+
     return f"{major}.{minor}"

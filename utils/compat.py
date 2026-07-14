@@ -1,7 +1,8 @@
 """
-Compatibility layer for handling differences across Blender versions.
-Supports Blender 3.0 through 5.0+
-Minimum supported: Blender 3.0
+Compatibility layer for handling differences across supported Blender versions.
+
+Supported targets: Blender 4.5 LTS and Blender 5.2 LTS.
+Minimum supported: Blender 4.5.0.
 """
 
 import bpy
