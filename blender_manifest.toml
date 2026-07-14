@@ -9,7 +9,7 @@ maintainer = "RaincloudTheDragon"
 blender_version_min = "3.0.0"
 license = ["GPL-3.0-or-later"]
 description = "Pack Blender projects with automatic asset discovery, path remapping, and farm-ready export."
-homepage = "https://github.com/RaincloudTheDragon/sheepit_project_submitter/"
+homepage = "https://github.com/RaincloudTheDragon/based-blendfile-packer/"
 tagline = "Farm-agnostic blendfile packing for any render pipeline"
 
 tags = ["render", "pack", "utility", "assets"]

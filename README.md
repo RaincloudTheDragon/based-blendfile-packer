@@ -24,7 +24,7 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 ## Installation
 
-1. Download the latest release from [GitHub Releases](https://github.com/RaincloudTheDragon/sheepit_project_submitter/releases)
+1. Download the latest release from [GitHub Releases](https://github.com/RaincloudTheDragon/based-blendfile-packer/releases)
 2. In Blender, go to `Edit > Preferences > Add-ons`
 3. Click `Install...` and select the downloaded ZIP file
 4. Enable the addon by checking the box next to "BasedBlendfilePacker"
@@ -49,4 +49,4 @@ GPL-3.0-or-later
 
 ## Links
 
-- **GitHub Repository**: [https://github.com/RaincloudTheDragon/sheepit_project_submitter](https://github.com/RaincloudTheDragon/sheepit_project_submitter)
+- **GitHub Repository**: [https://github.com/RaincloudTheDragon/based-blendfile-packer](https://github.com/RaincloudTheDragon/based-blendfile-packer)
