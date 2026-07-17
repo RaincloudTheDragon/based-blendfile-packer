@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 id = "based_blendfile_packer"
 name = "BasedBlendfilePacker"
-version = "0.0.8"
+version = "0.1.0"
 type = "add-on"
 author = "RaincloudTheDragon"
 maintainer = "RaincloudTheDragon"

@@ -1,3 +1,18 @@
+## [v0.1.0] - 2026-07-17
+
+### Changed
+- Rebranded to BasedBlendfilePacker; support target is Blender 4.5 LTS and 5.2 LTS (`blender_version_min` 4.5.0).
+- Asset discovery uses official Blender Asset Tracer: BAT v1 (vendored) on 4.5 LTS, BAT v2 (bundled wheel) on 5.1+/5.2 LTS. Replaces the old `batter` fork.
+- Dependabot tracks BAT v1/v2 pins and GitHub Actions; sync workflow refreshes wheels/vendor.
+
+### Removed
+- Pack Current Blend workflow (SheepIt-era leftover; #4).
+
+### Fixed
+- BAT v2 discovery during Pack as Blend with temp-file override (skip pack-path clustering; handle `Library | None` reference keys).
+
+---
+
 ## [v0.0.8] - 2026-03-16
 
 ### Fixed
