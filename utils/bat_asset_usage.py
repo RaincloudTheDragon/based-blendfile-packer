@@ -146,11 +146,29 @@ def library_abspath(lib: Library | None) -> Path:
     return Path(filepath).resolve()
 
 
-def _project_root() -> Path:
-    """Best-effort project root for BAT v2 dependency discovery."""
+def _bat_v2_project_root() -> Path:
+    """Project root for BAT v2, aligned with ``library_abspath(None)`` (incl. temp override)."""
+    blend_path = library_abspath(None)
+    if blend_path.name:
+        return blend_path.resolve().parent
     if bpy.data.filepath:
         return Path(bpy.data.filepath).resolve().parent
     return Path.cwd().resolve()
+
+
+def _v2_dependency_repo():
+    """Build a BAT v2 dependency repo for discovery only (skip pack-path clustering).
+
+    ``dependencies_of_current_blendfile()`` also runs pack-path clustering, which
+    BBP does not need for ``find()`` and which fails when the temp-blend override
+    disagrees with ``bpy.data.filepath`` (``Could not shorten these paths: ['.']``).
+    """
+    bat_fu = _bat_v2_file_usage()
+    root = _bat_v2_project_root()
+    with bat_fu.cache_autoclear():
+        deps_repo = bat_fu.FileDependencyRepository(root_path=root)
+        bat_fu._determine_dependencies(deps_repo, bat_fu.Options())
+    return deps_repo
 
 
 def _library_for_blend_path(blend_path: Path) -> Library | None:
@@ -189,8 +207,12 @@ def _repo_to_asset_usages(repo) -> dict[Library | None, set[AssetUsage]]:
             )
             continue
 
-        for blend_file_path in info.references:
-            lib = _library_for_blend_path(Path(blend_file_path))
+        # BAT stores references as BlendFile keys: Library | None (None = current blend).
+        for blend_ref in info.references:
+            if blend_ref is None or isinstance(blend_ref, Library):
+                lib = blend_ref
+            else:
+                lib = _library_for_blend_path(Path(blend_ref))
             usages[lib].add(
                 AssetUsage(
                     abspath=abs_path,
@@ -238,8 +260,12 @@ def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
 
 def _v2_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
     """Discover assets with BAT v2 in-Blender dependency tracing (5.2 LTS path)."""
-    bat_fu = _bat_v2_file_usage()
-    repo = bat_fu.dependencies_of_current_blendfile(_project_root())
+    try:
+        repo = _v2_dependency_repo()
+    except RuntimeError as exc:
+        print(f"[BBP BAT] v2 dependency discovery failed ({exc}); falling back to v1 trace")
+        return _v1_nonblend_asset_usage()
+
     all_usages = _repo_to_asset_usages(repo)
 
     nonblend: dict[Library | None, set[AssetUsage]] = defaultdict(set)
