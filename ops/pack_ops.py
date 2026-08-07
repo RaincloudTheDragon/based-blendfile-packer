@@ -22,6 +22,124 @@ class WorkflowMode:
     PACK_AND_SAVE = "pack-and-save"
 
 
+class DeadUncAssetError(RuntimeError):
+    """Raised when an inaccessible network/UNC path blocks packing."""
+
+    def __init__(self, path: str, kind: str = "", name: str = "", detail: str = ""):
+        self.path = path
+        self.kind = kind
+        self.name = name
+        self.detail = detail
+        lines = ["Pack aborted: inaccessible network path (dead UNC)."]
+        if path:
+            lines.append(f"  Path: {path}")
+        if kind or name:
+            used = f"{kind} '{name}'".strip() if kind else f"'{name}'"
+            lines.append(f"  Used by: {used}")
+        lines.append("Fix or remove this link before packing.")
+        if detail:
+            lines.append(f"  ({detail})")
+        super().__init__("\n".join(lines))
+
+
+class MissingPackAssetsError(RuntimeError):
+    """Raised when textures/fonts/media are missing and cannot be packed."""
+
+    def __init__(self, missing: list, source_hint: str = ""):
+        self.missing = list(missing)
+        names = []
+        seen = set()
+        for p in self.missing:
+            name = Path(p).name if p else str(p)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        count = len(names)
+        lines = [
+            f"Pack aborted: {count} external file(s) could not be packed (missing on disk).",
+        ]
+        for name in names[:15]:
+            lines.append(f"  - {name}")
+        if count > 15:
+            lines.append(f"  ... and {count - 15} more")
+        if source_hint:
+            lines.append(f"  ({source_hint})")
+        lines.append(
+            "Remap or remove these textures/fonts in the source .blend files, then pack again."
+        )
+        super().__init__("\n".join(lines))
+
+
+def find_dead_unc_assets() -> list[tuple[str, str, str, str]]:
+    """Scan the open blend for filepaths that fail OS resolve (dead UNC/network).
+
+    Packed datablocks are skipped — embedded data is self-contained even if the
+    original filepath points at a dead share.
+
+    Returns list of (kind, datablock_name, absolute_path, error_detail).
+    """
+    dead: list[tuple[str, str, str, str]] = []
+    checks = [
+        ("Image", bpy.data.images),
+        ("Font", bpy.data.fonts),
+        ("Sound", bpy.data.sounds),
+        ("MovieClip", getattr(bpy.data, "movieclips", [])),
+        ("Volume", getattr(bpy.data, "volumes", [])),
+        ("Library", bpy.data.libraries),
+    ]
+    for kind, coll in checks:
+        try:
+            items = list(coll)
+        except Exception:
+            continue
+        for item in items:
+            # Packed = data is embedded; stale/dead filepath is not a pack blocker
+            if getattr(item, "packed_file", None) is not None:
+                continue
+            fp = getattr(item, "filepath", None) or ""
+            if not fp or fp in ("", "<builtin>", "<memory>"):
+                continue
+            try:
+                abs_fp = bpy.path.abspath(fp)
+            except Exception:
+                abs_fp = fp
+            try:
+                Path(abs_fp).resolve()
+            except OSError as e:
+                dead.append((kind, item.name, abs_fp, str(e)))
+    return dead
+
+
+def _extract_dead_unc_from_output(stdout: str, stderr: str) -> Optional[tuple[str, str, str, str]]:
+    """Parse BBP_FATAL_DEAD_UNC markers (or WinError 1272) from Blender script output."""
+    import re
+    combined = (stdout or "") + "\n" + (stderr or "")
+    path = kind = name = detail = ""
+    for line in combined.splitlines():
+        if line.startswith("BBP_FATAL_DEAD_UNC:"):
+            path = line.split(":", 1)[1].strip()
+        elif line.startswith("BBP_FATAL_DEAD_UNC_KIND:"):
+            kind = line.split(":", 1)[1].strip()
+        elif line.startswith("BBP_FATAL_DEAD_UNC_NAME:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("BBP_FATAL_DEAD_UNC_ERR:"):
+            detail = line.split(":", 1)[1].strip()
+    if path:
+        return path, kind, name, detail
+    # Fallback: WinError 1272 / guest-access block embeds the UNC in the message
+    m = re.search(
+        r"OSError:\s*\[WinError\s+1272\].*?:\s*'([^']+)'",
+        combined,
+        re.DOTALL,
+    )
+    if m:
+        return m.group(1), "", "", "WinError 1272"
+    if "WinError 1272" in combined or "unauthenticated guest access" in combined:
+        m2 = re.search(r"'(\\\\[^']+)'", combined)
+        return (m2.group(1) if m2 else "(unknown UNC path)"), "", "", "WinError 1272"
+    return None
+
+
 def compute_target_relpath(abs_path: Path, base_root: Path) -> Path:
     """Return a stable relative path under the target, even if outside root."""
     try:
@@ -426,7 +544,7 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         target_path_str = str(target_path).replace('\\', '\\\\')
         
         remap_script = (
-            "import bpy, json\n"
+            "import bpy, json, sys, os\n"
             "from pathlib import Path\n"
             f"copy_map_file = Path(r'{copy_map_file_str}')\n"
             f"with open(copy_map_file, 'r', encoding='utf-8') as f:\n"
@@ -435,9 +553,20 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
             f"target_path = Path(r'{target_path_str}')\n"
             "blend_dir = Path(bpy.data.filepath).parent\n"
         "bpy.context.preferences.filepaths.use_relative_paths = True\n"
+        "def abort_dead_unc(path, kind='', name='', err=''):\n"
+        "    print('BBP_FATAL_DEAD_UNC:' + str(path))\n"
+        "    print('BBP_FATAL_DEAD_UNC_KIND:' + str(kind))\n"
+        "    print('BBP_FATAL_DEAD_UNC_NAME:' + str(name))\n"
+        "    print('BBP_FATAL_DEAD_UNC_ERR:' + str(err))\n"
+        "    print('Pack aborted: inaccessible network path (dead UNC):', path)\n"
+        "    sys.exit(2)\n"
+        "def safe_resolve(p, kind='', name=''):\n"
+        "    try:\n"
+        "        return Path(p).resolve()\n"
+        "    except OSError as e:\n"
+        "        abort_dead_unc(p, kind, name, e)\n"
         "def norm_key(p):\n"
-        "    s = str(Path(p).resolve())\n"
-        "    import os\n"
+        "    s = str(safe_resolve(p))\n"
         "    if os.name == 'nt':\n"
         "        return s.lower().replace(chr(92), '/')\n"
         "    return s\n"
@@ -447,12 +576,15 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "print('Remapping library paths in:', bpy.path.basename(bpy.data.filepath))\n"
         "print('Found', len(bpy.data.libraries), 'libraries')\n"
         "for lib in bpy.data.libraries:\n"
+        "    if getattr(lib, 'packed_file', None):\n"
+        "        print('  Skipping packed library:', lib.name)\n"
+        "        continue\n"
         "    src = lib.filepath\n"
         "    print('  Processing library:', lib.name, ', current path:', src)\n"
         "    if src.startswith('//'):\n"
-        "        abs_src = (blend_dir / src[2:]).resolve()\n"
+        "        abs_src = safe_resolve(blend_dir / src[2:], 'Library', lib.name)\n"
         "    else:\n"
-        "        abs_src = Path(src).resolve()\n"
+        "        abs_src = safe_resolve(src, 'Library', lib.name)\n"
         "    key = norm_key(abs_src)\n"
         "    new_abs = None\n"
         "    try:\n"
@@ -466,13 +598,13 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "        print('    Found in copy_map:', new_abs)\n"
         "    if new_abs is None:\n"
         "        for cm_k, cm_v in copy_map_norm.items():\n"
-        "            if Path(cm_v).resolve() == abs_src:\n"
+        "            if safe_resolve(cm_v) == abs_src:\n"
         "                new_abs = abs_src\n"
         "                break\n"
         "    if new_abs is None:\n"
         "        try:\n"
         "            rel_to_root = abs_src.relative_to(common_root)\n"
-        "            new_abs = (target_path / rel_to_root).resolve()\n"
+        "            new_abs = safe_resolve(target_path / rel_to_root)\n"
         "            print('    Computed from common_root:', new_abs)\n"
         "        except Exception:\n"
         "            pass\n"
@@ -499,12 +631,14 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "# Remap image/texture paths\n"
         "images_remapped = 0\n"
         "for img in bpy.data.images:\n"
+        "    if getattr(img, 'packed_file', None):\n"
+        "        continue  # packed data is self-contained; ignore dead filepath\n"
         "    if img.filepath and img.filepath not in ('', '<builtin>', '<memory>'):\n"
         "        src = img.filepath\n"
         "        if src.startswith('//'):\n"
-        "            abs_src = (blend_dir / src[2:]).resolve()\n"
+        "            abs_src = safe_resolve(blend_dir / src[2:], 'Image', img.name)\n"
         "        else:\n"
-        "            abs_src = Path(src).resolve()\n"
+        "            abs_src = safe_resolve(src, 'Image', img.name)\n"
         "        key = norm_key(abs_src)\n"
         "        new_abs = None\n"
         "        try:\n"
@@ -516,13 +650,13 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "            new_abs = Path(copy_map_norm[key])\n"
         "        if new_abs is None:\n"
         "            for cm_k, cm_v in copy_map_norm.items():\n"
-        "                if Path(cm_v).resolve() == abs_src:\n"
+        "                if safe_resolve(cm_v) == abs_src:\n"
         "                    new_abs = abs_src\n"
         "                    break\n"
         "        if new_abs is None:\n"
         "            try:\n"
         "                rel_to_root = abs_src.relative_to(common_root)\n"
-        "                new_abs = (target_path / rel_to_root).resolve()\n"
+        "                new_abs = safe_resolve(target_path / rel_to_root)\n"
         "            except Exception:\n"
         "                pass\n"
         "        if new_abs is not None and new_abs.exists():\n"
@@ -548,14 +682,14 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "        new_abs = Path(copy_map_norm[key])\n"
         "    if new_abs is None:\n"
         "        for cm_k, cm_v in copy_map_norm.items():\n"
-        "            if Path(cm_v).resolve() == abs_src:\n"
+        "            if safe_resolve(cm_v) == abs_src:\n"
         "                new_abs = abs_src\n"
         "                break\n"
         "    if new_abs is None:\n"
         "        for src_prefix in sorted(copy_map_norm.keys(), key=lambda x: -len(x)):\n"
         "            try:\n"
         "                rel = abs_src.relative_to(Path(src_prefix))\n"
-        "                candidate = (Path(copy_map_norm[src_prefix]) / rel).resolve()\n"
+        "                candidate = safe_resolve(Path(copy_map_norm[src_prefix]) / rel)\n"
         "                if candidate.exists():\n"
         "                    new_abs = candidate\n"
         "                    break\n"
@@ -564,7 +698,7 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "    if new_abs is None:\n"
         "        try:\n"
         "            rel_to_root = abs_src.relative_to(common_root)\n"
-        "            new_abs = (target_path / rel_to_root).resolve()\n"
+        "            new_abs = safe_resolve(target_path / rel_to_root)\n"
         "        except Exception:\n"
         "            pass\n"
         "    if new_abs is not None and new_abs.exists():\n"
@@ -574,13 +708,13 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "        except Exception:\n"
         "            return str(new_abs)\n"
         "    return None\n"
-        "def do_remap_path(src):\n"
+        "def do_remap_path(src, kind='Cache', name=''):\n"
         "    if not src or src in ('', '<builtin>', '<memory>'):\n"
         "        return None\n"
         "    if src.startswith('//'):\n"
-        "        abs_src = (blend_dir / src[2:]).resolve()\n"
+        "        abs_src = safe_resolve(blend_dir / src[2:], kind, name)\n"
         "    else:\n"
-        "        abs_src = Path(src).resolve()\n"
+        "        abs_src = safe_resolve(src, kind, name)\n"
         "    new_path = remap_abs_to_rel(abs_src)\n"
         "    if new_path is not None:\n"
         "        return new_path\n"
@@ -591,13 +725,13 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "        if ps and getattr(ps, 'point_cache', None):\n"
         "            pc = ps.point_cache\n"
         "            if getattr(pc, 'filepath', None):\n"
-        "                new_path = do_remap_path(pc.filepath)\n"
+        "                new_path = do_remap_path(pc.filepath, 'PointCache', obj.name)\n"
         "                if new_path is not None:\n"
         "                    pc.filepath = new_path\n"
         "                    caches_remapped += 1\n"
         "        pc = getattr(mod, 'point_cache', None)\n"
         "        if pc and getattr(pc, 'filepath', None):\n"
-        "            new_path = do_remap_path(pc.filepath)\n"
+        "            new_path = do_remap_path(pc.filepath, 'PointCache', obj.name)\n"
         "            if new_path is not None:\n"
         "                pc.filepath = new_path\n"
         "                caches_remapped += 1\n"
@@ -606,7 +740,7 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         "cache_files_remapped = 0\n"
         "for cf in getattr(bpy.data, 'cache_files', []):\n"
         "    if getattr(cf, 'filepath', None):\n"
-        "        new_path = do_remap_path(cf.filepath)\n"
+        "        new_path = do_remap_path(cf.filepath, 'CacheFile', getattr(cf, 'name', ''))\n"
         "        if new_path is not None:\n"
         "            cf.filepath = new_path\n"
         "            cache_files_remapped += 1\n"
@@ -633,6 +767,17 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
                 copy_map_file.unlink()
         except Exception:
             pass
+    
+    # Dead UNC / inaccessible network path: abort packing (do not claim success)
+    dead = _extract_dead_unc_from_output(stdout or "", stderr or "")
+    if dead or returncode == 2:
+        if dead:
+            path, kind, name, detail = dead
+        else:
+            path, kind, name, detail = "(unknown)", "", blend_path.name, f"exit code {returncode}"
+        err = DeadUncAssetError(path, kind, name or blend_path.name, detail)
+        print(f"[BBP Pack] ERROR: {err}")
+        raise err
     
     unresolved = []
     
@@ -933,7 +1078,7 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
             print(f"[BBP Pack]     - {mf.name if mf.name else mf}")
         if len(missing_files) > 5:
             print(f"[BBP Pack]     ... and {len(missing_files) - 5} more")
-        print(f"[BBP Pack]   Note: Missing linked files cannot be packed. The blend file will still be saved without these libraries.")
+        print(f"[BBP Pack]   Note: Missing files cannot be packed; pack will abort after linked packing finishes.")
     
     if oversized_files:
         print(f"[BBP Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over size limit):")
@@ -1064,6 +1209,7 @@ class IncrementalPacker:
         
         # Pack linked issues tracking
         self.oversized_files_all = []  # Collect all oversized files from pack_linked operations
+        self.missing_files_all = []  # Collect missing textures/fonts that couldn't be packed
         
         # Results
         self.file_path = None
@@ -1096,6 +1242,15 @@ class IncrementalPacker:
             print(f"[BBP Pack] Finding asset usages...")
             if self.progress_callback:
                 self.progress_callback(5.0, "Finding asset usages...")
+            # Abort early if any datablock points at a dead UNC / inaccessible network path
+            dead_assets = find_dead_unc_assets()
+            if dead_assets:
+                kind, name, path, detail = dead_assets[0]
+                if len(dead_assets) > 1:
+                    detail = f"{detail}; (+{len(dead_assets) - 1} more)"
+                err = DeadUncAssetError(path, kind, name, detail)
+                print(f"[BBP Pack] ERROR: {err}")
+                raise err
             self.asset_usages = au.find()
             self.top_level_blend_abs = au.library_abspath(None).resolve()
             print(f"[BBP Pack] Found {len(self.asset_usages)} libraries with assets")
@@ -1279,6 +1434,12 @@ class IncrementalPacker:
                 print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
                 if self.missing_on_copy:
                     print(f"[BBP Pack]   Missing files: {[str(p) for p in self.missing_on_copy[:5]]}...")
+                    err = MissingPackAssetsError(
+                        self.missing_on_copy,
+                        source_hint="found while copying assets into the pack tree",
+                    )
+                    print(f"[BBP Pack] ERROR: {err}")
+                    raise err
                 # Check if we need to truncate caches
                 # Skip truncation for COPY_ONLY workflow if caches were filtered during copy
                 caches_filtered_during_copy = (self.copy_only_mode and 
@@ -1461,6 +1622,9 @@ class IncrementalPacker:
                     print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
                         missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=self.max_size_bytes)
+                        # Collect missing textures/fonts/libs for a hard abort after all blends
+                        if missing_files:
+                            self.missing_files_all.extend(missing_files)
                         # Track oversized files for user reporting
                         if oversized_files:
                             self.oversized_files_all.extend(oversized_files)
@@ -1477,13 +1641,20 @@ class IncrementalPacker:
                         print(f"[BBP Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        # Continue with next file rather than failing completely
+                        # Continue with next file; missing-file abort happens after the full pass
                 else:
                     print(f"[BBP Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
                 self.pack_linked_index += 1
                 return ('PACK_LINKED', False)
             else:
                 print(f"[BBP Pack] Finished packing linked libraries")
+                if self.missing_files_all:
+                    err = MissingPackAssetsError(
+                        self.missing_files_all,
+                        source_hint="found while packing linked libraries",
+                    )
+                    print(f"[BBP Pack] ERROR: {err}")
+                    raise err
                 self.phase = 'COMPLETE'
                 return ('COMPLETE', False)
         
@@ -1542,6 +1713,15 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     print(f"[BBP Pack] Mode: {'COPY_ONLY' if copy_only_mode else 'PACK_AND_SAVE'}")
     print(f"[BBP Pack] Autopack on save: {autopack_on_save}, Pack linked: {run_pack_linked}")
     
+    dead_assets = find_dead_unc_assets()
+    if dead_assets:
+        kind, name, path, detail = dead_assets[0]
+        if len(dead_assets) > 1:
+            detail = f"{detail}; (+{len(dead_assets) - 1} more)"
+        err = DeadUncAssetError(path, kind, name, detail)
+        print(f"[BBP Pack] ERROR: {err}")
+        raise err
+
     # Find asset usages
     print(f"[BBP Pack] Finding asset usages...")
     if progress_callback:
@@ -1683,6 +1863,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
     if missing_on_copy:
         print(f"[BBP Pack]   Missing files: {[str(p) for p in missing_on_copy[:5]]}...")  # First 5
+        err = MissingPackAssetsError(
+            missing_on_copy,
+            source_hint="found while copying assets into the pack tree",
+        )
+        print(f"[BBP Pack] ERROR: {err}")
+        raise err
     
     # Remap library paths
     print(f"[BBP Pack] Finding blend dependencies...")
@@ -1760,6 +1946,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             print(f"[BBP Pack] Packing linked libraries...")
             if progress_callback:
                 progress_callback(80.0, "Packing linked libraries...")
+            missing_files_all = []
             for i, blend_to_fix in enumerate(to_remap, 1):
                 if cancel_check and cancel_check():
                     raise InterruptedError("Packing cancelled by user")
@@ -1770,6 +1957,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
                     max_size_bytes = _get_project_size_limit_bytes()
                     missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=max_size_bytes)
+                    if missing_files:
+                        missing_files_all.extend(missing_files)
                     issues = []
                     if missing_files:
                         issues.append(f"{len(missing_files)} missing")
@@ -1778,6 +1967,13 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     if issues:
                         print(f"[BBP Pack]     Note: {', '.join(issues)} linked files could not be packed")
             print(f"[BBP Pack] Finished packing linked libraries")
+            if missing_files_all:
+                err = MissingPackAssetsError(
+                    missing_files_all,
+                    source_hint="found while packing linked libraries",
+                )
+                print(f"[BBP Pack] ERROR: {err}")
+                raise err
     
     print(f"[BBP Pack] Pack process completed successfully!")
     print(f"[BBP Pack] Output directory: {target_path}")
@@ -2050,9 +2246,9 @@ class BBP_OT_pack_zip(Operator):
                         print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        self._error = f"Packing failed: {str(e)}"
+                        self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {str(e)}"
                         self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
+                        self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_PACKED':
@@ -2321,9 +2517,9 @@ class BBP_OT_pack_zip(Operator):
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self._error = f"Packing failed: {type(e).__name__}: {str(e)}"
+                self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {type(e).__name__}: {str(e)}"
                 self._cleanup(context, cancelled=True)
-                self.report({'ERROR'}, self._error)
+                self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
         
         return {'RUNNING_MODAL'}
@@ -2592,9 +2788,9 @@ class BBP_OT_pack_blend(Operator):
                         print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        self._error = f"Packing failed: {str(e)}"
+                        self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {str(e)}"
                         self._cleanup(context, cancelled=True)
-                        self.report({'ERROR'}, self._error)
+                        self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_TARGET':
@@ -2713,9 +2909,9 @@ class BBP_OT_pack_blend(Operator):
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self._error = f"Packing failed: {type(e).__name__}: {str(e)}"
+                self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {type(e).__name__}: {str(e)}"
                 self._cleanup(context, cancelled=True)
-                self.report({'ERROR'}, self._error)
+                self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
         
         return {'RUNNING_MODAL'}
