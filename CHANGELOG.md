@@ -1,3 +1,11 @@
+## [v0.1.1] - 2026-08-07
+
+### Fixed
+- Pack aborts on dead UNC/network asset paths (skips already-packed datablocks) instead of failing mid-remap with incomplete output.
+- Pack aborts when textures/fonts/media are missing and cannot be packed; asks user to remap or remove them in the source blends.
+
+---
+
 ## [v0.1.0] - 2026-07-17
 
 ### Changed
