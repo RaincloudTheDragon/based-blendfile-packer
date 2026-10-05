@@ -14,6 +14,7 @@ from bpy.types import Operator
 from bpy.props import EnumProperty
 
 from ..utils import bat_asset_usage as au
+from ..utils import wm_progress
 from .export_ops import _MEDIA_EXTENSIONS
 
 
@@ -77,8 +78,7 @@ class DeadUncAssetError(RuntimeError):
 def find_dead_unc_assets() -> list[tuple[str, str, str, str]]:
     """Scan the open blend for filepaths that fail OS resolve (dead UNC/network).
 
-    Packed datablocks are skipped — embedded data is self-contained even if the
-    original filepath points at a dead share.
+    Packed datablocks are skipped — embedded data is self-contained even if the original filepath points at a dead share.
 
     Returns list of (kind, datablock_name, absolute_path, error_detail).
     """
@@ -178,15 +178,12 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                       copy_map_out: Optional[dict] = None) -> list[Path]:
     """Copy common cache folders for a given .blend next to its target copy.
 
-    If frame range parameters are provided, only copies cache files within that range.
-    Otherwise, copies all cache files.
-    On Windows we use robocopy when frame filtering; source path is kept as given (e.g. P:\)
-    so mapped drives work instead of resolving to UNC.
+    If frame range parameters are provided, only copies cache files within that range. Otherwise, copies all cache files. On Windows we use robocopy when frame filtering; source path is kept as given (e.g. P:\\) so mapped drives work instead of resolving to UNC.
     """
     import re
     import subprocess as _sub
     copied = []
-    # Keep source path as-is on Windows so P:\ stays P:\ (resolve can turn it into UNC and break robocopy)
+    # Keep source path as-is on Windows so P:\\ stays P:\\ (resolve can turn it into UNC and break robocopy)
     if os.name != "nt":
         src_blend = src_blend.resolve()
     dst_blend = dst_blend.resolve()
@@ -2059,6 +2056,9 @@ class BBP_OT_pack_zip(Operator):
         self._message = ""
         self._error = None
         self._packer = None  # IncrementalPacker instance
+        # OS taskbar via ITaskbarList3 (Atomic wm_progress pattern)
+        wm_progress.begin()
+        wm_progress.set_progress(0.0)
         
         # Create timer for modal updates
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
@@ -2095,6 +2095,7 @@ class BBP_OT_pack_zip(Operator):
         if event.type == 'TIMER':
             try:
                 print(f"[BBP Pack] DEBUG: Modal timer event, current phase: {self._phase}")
+                wm_progress.set_progress(pack_settings.pack_progress)
                 
                 if self._phase == 'INIT':
                     print(f"[BBP Pack] DEBUG: Entering INIT phase")
@@ -2173,6 +2174,7 @@ class BBP_OT_pack_zip(Operator):
                         # Map packer progress (0-100%) to operator progress (15-61%)
                         pack_settings.pack_progress = 15.0 + (progress_pct * 0.46)
                         pack_settings.pack_status_message = message
+                        wm_progress.set_progress(pack_settings.pack_progress)
                         print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
@@ -2508,6 +2510,7 @@ class BBP_OT_pack_zip(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     pack_settings.pack_progress = 100.0
+                    wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
                     pack_settings.pack_status_message = (
                         f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
@@ -2550,6 +2553,9 @@ class BBP_OT_pack_zip(Operator):
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
             context.window_manager.event_timer_remove(self._timer)
+        
+        # Clear OS taskbar (ITaskbarList3)
+        wm_progress.end()
         
         # Reset progress properties
         pack_settings.is_packing = False
@@ -2626,6 +2632,9 @@ class BBP_OT_pack_blend(Operator):
         self._message = ""
         self._error = None
         self._packer = None  # IncrementalPacker instance
+        # OS taskbar via ITaskbarList3 (Atomic wm_progress pattern)
+        wm_progress.begin()
+        wm_progress.set_progress(0.0)
         
         # Create timer for modal updates
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
@@ -2656,6 +2665,7 @@ class BBP_OT_pack_blend(Operator):
         # Handle timer events
         if event.type == 'TIMER':
             try:
+                wm_progress.set_progress(pack_settings.pack_progress)
                 if self._phase == 'INIT':
                     pack_settings.pack_progress = 0.0
                     pack_settings.pack_status_message = "Initializing..."
@@ -2717,6 +2727,7 @@ class BBP_OT_pack_blend(Operator):
                         # Map packer progress (0-100%) to operator progress (15-70%)
                         pack_settings.pack_progress = 15.0 + (progress_pct * 0.55)
                         pack_settings.pack_status_message = message
+                        wm_progress.set_progress(pack_settings.pack_progress)
                         print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
@@ -2908,6 +2919,7 @@ class BBP_OT_pack_blend(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     pack_settings.pack_progress = 100.0
+                    wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
                     pack_settings.pack_status_message = (
                         f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
@@ -2950,6 +2962,9 @@ class BBP_OT_pack_blend(Operator):
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
             context.window_manager.event_timer_remove(self._timer)
+        
+        # Clear OS taskbar (ITaskbarList3)
+        wm_progress.end()
         
         # Reset progress properties
         pack_settings.is_packing = False
@@ -3120,15 +3135,17 @@ class BBP_OT_pack_zip_sync(Operator):
 
 def register():
     """Register operators."""
-    bpy.utils.register_class(BBP_OT_pack_zip)
-    bpy.utils.register_class(BBP_OT_pack_zip_sync)
-    bpy.utils.register_class(BBP_OT_pack_blend)
-    bpy.utils.register_class(BBP_OT_enable_nla)
+    from ..utils import compat
+    compat.safe_register_class(BBP_OT_pack_zip)
+    compat.safe_register_class(BBP_OT_pack_zip_sync)
+    compat.safe_register_class(BBP_OT_pack_blend)
+    compat.safe_register_class(BBP_OT_enable_nla)
 
 
 def unregister():
     """Unregister operators."""
-    bpy.utils.unregister_class(BBP_OT_enable_nla)
-    bpy.utils.unregister_class(BBP_OT_pack_blend)
-    bpy.utils.unregister_class(BBP_OT_pack_zip_sync)
-    bpy.utils.unregister_class(BBP_OT_pack_zip)
+    from ..utils import compat
+    compat.safe_unregister_class(BBP_OT_enable_nla)
+    compat.safe_unregister_class(BBP_OT_pack_blend)
+    compat.safe_unregister_class(BBP_OT_pack_zip_sync)
+    compat.safe_unregister_class(BBP_OT_pack_zip)

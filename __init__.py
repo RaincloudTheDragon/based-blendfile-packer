@@ -12,6 +12,12 @@ from . import ui
 from . import rainys_repo_bootstrap
 
 
+def _load_pre_end_taskbar(_dummy):
+    # File load can orphan a painted taskbar bar mid-pack; clear before scene swap.
+    from .utils import wm_progress
+    wm_progress.end()
+
+
 def _update_output_path(self, context):
     """Update callback for output_path property - auto-populates from preferences if empty."""
     if not self.output_path:
@@ -123,10 +129,16 @@ def register():
     ui.register()
     rainys_repo_bootstrap.register()
 
+    if _load_pre_end_taskbar not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_load_pre_end_taskbar)
+
 
 def unregister():
     """Unregister the addon."""
     from .utils import compat
+
+    if _load_pre_end_taskbar in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_load_pre_end_taskbar)
 
     rainys_repo_bootstrap.unregister()
     ui.unregister()
