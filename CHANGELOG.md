@@ -1,3 +1,15 @@
+## [v0.2.0] - 2026-10-05
+
+### Features
+
+- Windows taskbar progress during pack (#9).
+- Display-only `layout.progress()` bar in the Output panel (#10);
+- Cancel button (Esc still works).
+
+### Fixes
+
+- Missing/offline assets no longer abort the pack; reported Flamenco-style instead. Exclude A/V option renamed to `exclude_av`.
+
 ## [v0.1.1] - 2026-08-07
 
 ### Fixes
