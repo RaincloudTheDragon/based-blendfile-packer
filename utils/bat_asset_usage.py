@@ -10,6 +10,16 @@ Supported Blender targets and BAT backends:
 
 Both backends are always shipped: the v2 wheel is only installed on Blender 5.1+
 (Python 3.13), so it cannot conflict with the vendored v1 tree on 4.5 LTS.
+
+Packed datablocks are filtered locally so their filepaths are not copied or treated as
+missing:
+
+- Classic ``packed_file`` (images/fonts/libs/…).
+- Blender 5.0+ packed-linked IDs (``ID.is_linked_packed``) stored in archive libraries
+  (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon; source path may
+  be dead while data lives in the current .blend.
+
+Workaround until BAT v2 skips these in tracing (open upstream PR).
 """
 
 from __future__ import annotations
@@ -186,6 +196,120 @@ def _library_for_blend_path(blend_path: Path) -> Library | None:
     return None
 
 
+def _library_is_packed(lib: Library | None) -> bool:
+    """True when a library's data is already stored in the current .blend.
+
+    Covers classic ``packed_file`` and Blender 5.0+ packed-linked archive libs
+    (``is_archive`` / parent with ``archive_libraries``). Archive parents keep a
+    stale source filepath even though IDs live in the archive child.
+    """
+    if lib is None:
+        return False
+    if getattr(lib, "packed_file", None) is not None:
+        return True
+    # Blender 5.0+: archive storage for Pack Linked Libraries
+    if getattr(lib, "is_archive", False):
+        return True
+    archives = getattr(lib, "archive_libraries", None)
+    try:
+        if archives is not None and len(archives) > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _id_is_linked_packed(item) -> bool:
+    """True when an ID is linked-but-packed into this .blend (Blender 5.0+)."""
+    return bool(getattr(item, "is_linked_packed", False))
+
+
+def _path_variants(filepath: str) -> set[Path]:
+    """Absolute path forms for matching BAT-reported paths to packed datablocks."""
+    if not filepath or filepath in ("", "<builtin>", "<memory>"):
+        return set()
+    variants: set[Path] = set()
+    try:
+        abs_fp = bpy.path.abspath(filepath)
+    except Exception:
+        return set()
+    if not abs_fp:
+        return set()
+    raw = Path(abs_fp)
+    variants.add(raw)
+    try:
+        variants.add(raw.resolve())
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return variants
+
+
+def _packed_external_paths() -> set[Path]:
+    """Resolved filepaths belonging to packed / packed-linked datablocks.
+
+    Local workaround: BAT v2 still reports these paths; they must not be treated as
+    external copy/missing targets.
+    """
+    packed: set[Path] = set()
+    collections = [
+        bpy.data.images,
+        bpy.data.fonts,
+        bpy.data.sounds,
+        getattr(bpy.data, "movieclips", []),
+        getattr(bpy.data, "volumes", []),
+        bpy.data.libraries,
+        bpy.data.texts,
+        bpy.data.node_groups,
+    ]
+    for coll in collections:
+        try:
+            items = list(coll)
+        except Exception:
+            continue
+        for item in items:
+            has_packed_file = getattr(item, "packed_file", None) is not None
+            linked_packed = _id_is_linked_packed(item)
+            is_embedded_lib = isinstance(item, Library) and _library_is_packed(item)
+            if not (has_packed_file or linked_packed or is_embedded_lib):
+                continue
+            filepath = getattr(item, "filepath", None) or ""
+            # Linked-packed IDs often inherit filepath via their library
+            if not filepath and getattr(item, "library", None) is not None:
+                filepath = getattr(item.library, "filepath", None) or ""
+            packed.update(_path_variants(filepath))
+    return packed
+
+
+def _filter_packed_usages(
+    usages: dict[Library | None, set[AssetUsage]],
+) -> dict[Library | None, set[AssetUsage]]:
+    """Drop usages whose abspath matches a packed / packed-linked datablock filepath."""
+    packed = _packed_external_paths()
+    if not packed:
+        return usages
+
+    filtered: dict[Library | None, set[AssetUsage]] = defaultdict(set)
+    skipped = 0
+    for lib, items in usages.items():
+        # Skip entire groups owned by archive / packed libraries
+        if _library_is_packed(lib):
+            skipped += len(items)
+            continue
+        for item in items:
+            path = item.abspath
+            try:
+                resolved = path.resolve()
+            except (OSError, RuntimeError, ValueError):
+                resolved = path
+            if path in packed or resolved in packed:
+                skipped += 1
+                continue
+            filtered[lib].add(item)
+    if skipped:
+        print(f"[BBP BAT] Skipped {skipped} packed/packed-linked path(s) (not traced as external)")
+    return dict(filtered)
+
+
 def _repo_to_asset_usages(repo) -> dict[Library | None, set[AssetUsage]]:
     """Convert BAT v2 ``FileDependencyRepository`` to BBP's legacy grouping."""
     usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
@@ -213,6 +337,9 @@ def _repo_to_asset_usages(repo) -> dict[Library | None, set[AssetUsage]]:
                 lib = blend_ref
             else:
                 lib = _library_for_blend_path(Path(blend_ref))
+            # Packed libraries are self-contained; don't attribute external assets to them.
+            if _library_is_packed(lib):
+                continue
             usages[lib].add(
                 AssetUsage(
                     abspath=abs_path,
@@ -221,13 +348,16 @@ def _repo_to_asset_usages(repo) -> dict[Library | None, set[AssetUsage]]:
                 )
             )
 
-    return dict(usages)
+    return _filter_packed_usages(dict(usages))
 
 
 def _iter_session_blend_paths() -> Iterable[tuple[Library | None, Path]]:
     """Yield each loaded blend file in the session as ``(library, abspath)``."""
     yield None, library_abspath(None)
     for lib in bpy.data.libraries:
+        # Packed libs are self-contained; skip disk tracing of their filepaths.
+        if _library_is_packed(lib):
+            continue
         yield lib, library_abspath(lib)
 
 
@@ -235,6 +365,7 @@ def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
     """Discover non-blend assets with BAT v1 file tracing (4.5 LTS path)."""
     bat_trace = _bat_v1_trace()
     usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
+    packed = _packed_external_paths()
 
     for lib, blend_path in _iter_session_blend_paths():
         if not blend_path.exists() or blend_path.suffix.lower() != ".blend":
@@ -245,6 +376,8 @@ def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
             for asset_path in block_usage.files():
                 resolved = asset_path.resolve()
                 if resolved in seen or resolved.suffix.lower() == ".blend":
+                    continue
+                if resolved in packed or asset_path in packed:
                     continue
                 seen.add(resolved)
                 usages[lib].add(
@@ -282,9 +415,18 @@ def find_blend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
 
     for _id, id_users in bpy.data.user_map().items():
         id_lib = _id.library
+        # Blender 5.0+ packed-linked IDs are already stored in this .blend (archive libs).
+        if _id_is_linked_packed(_id):
+            continue
+        # Packed library datablocks / archive storage — don't require their filepath.
+        if _library_is_packed(id_lib):
+            continue
         libs_deps.setdefault(id_lib, set())
         for id_user in id_users:
             if id_user.library == id_lib:
+                continue
+            # Skip when the referencing blend is itself a packed/archive library.
+            if _library_is_packed(id_user.library):
                 continue
 
             libs_deps[id_user.library].add(
@@ -295,11 +437,11 @@ def find_blend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
                 )
             )
 
-    return dict(libs_deps)
+    return _filter_packed_usages(dict(libs_deps))
 
 
 def find_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
-    """Map each blend file to non-blend assets it references."""
+    """Map each blend file to non-blend assets it references (excludes packed)."""
     if uses_bat_v2():
         return _v2_nonblend_asset_usage()
     return _v1_nonblend_asset_usage()
