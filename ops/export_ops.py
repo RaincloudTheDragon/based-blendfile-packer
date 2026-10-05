@@ -93,14 +93,14 @@ def save_current_blend_with_frame_range(pack_settings, temp_dir: Optional[Path] 
     return temp_blend, frame_start, frame_end, frame_step
 
 
-# Video and audio extensions to exclude when exclude_video=True
+# Video and audio extensions to exclude when exclude_av=True
 _MEDIA_EXTENSIONS = frozenset({
     '.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.ogv', '.mpg', '.mpeg', '.m2v',
     '.wav', '.mp3', '.ogg', '.flac', '.aac', '.m4a', '.wma', '.opus', '.aiff', '.aif',
 })
 
 
-def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None, exclude_video: bool = False) -> None:
+def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None, exclude_av: bool = False) -> None:
     """Create a ZIP file from a directory.
     
     Args:
@@ -108,7 +108,7 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
         output_zip: Output ZIP file path
         progress_callback: Optional callback(progress_pct, message) for progress updates
         cancel_check: Optional callback() -> bool to check for cancellation
-        exclude_video: If True, skip common video and audio file extensions
+        exclude_av: If True, skip common video and audio file extensions
     """
     import time
     
@@ -154,7 +154,7 @@ def create_zip_from_directory(directory: Path, output_zip: Path, progress_callba
             file_path = root_path / file
             if not file_path.exists():
                 continue
-            if exclude_video and file_path.suffix.lower() in _MEDIA_EXTENSIONS:
+            if exclude_av and file_path.suffix.lower() in _MEDIA_EXTENSIONS:
                 continue
             file_count += 1
             total_size += file_path.stat().st_size

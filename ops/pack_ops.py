@@ -14,12 +14,44 @@ from bpy.types import Operator
 from bpy.props import EnumProperty
 
 from ..utils import bat_asset_usage as au
+from .export_ops import _MEDIA_EXTENSIONS
 
 
 class WorkflowMode:
     """Workflow mode constants."""
     COPY_ONLY = "copy-only"
     PACK_AND_SAVE = "pack-and-save"
+
+
+def _is_excluded_media_path(path: Path, exclude_av: bool) -> bool:
+    """True when path is video/audio and exclude_av is enabled."""
+    return bool(exclude_av) and path.suffix.lower() in _MEDIA_EXTENSIONS
+
+
+def _unique_missing_names(missing: list) -> list[str]:
+    """Dedupe missing paths to display names (preserve order)."""
+    names = []
+    seen = set()
+    for p in missing:
+        name = Path(p).name if p else str(p)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _log_missing_assets_summary(missing: list) -> str:
+    """Print Flamenco-style offline-files summary; return a short UI message (or "")."""
+    names = _unique_missing_names(missing)
+    if not names:
+        return ""
+    print(f"[BBP Pack] Pack completed with {len(names)} missing/offline file(s):")
+    for name in names[:30]:
+        print(f"[BBP Pack]   - {name}")
+    if len(names) > 30:
+        print(f"[BBP Pack]   ... and {len(names) - 30} more")
+    print("[BBP Pack] Review the list — remap or remove in source blends if needed.")
+    return f"{len(names)} missing/offline file(s) (see system console)"
 
 
 class DeadUncAssetError(RuntimeError):
@@ -39,34 +71,6 @@ class DeadUncAssetError(RuntimeError):
         lines.append("Fix or remove this link before packing.")
         if detail:
             lines.append(f"  ({detail})")
-        super().__init__("\n".join(lines))
-
-
-class MissingPackAssetsError(RuntimeError):
-    """Raised when textures/fonts/media are missing and cannot be packed."""
-
-    def __init__(self, missing: list, source_hint: str = ""):
-        self.missing = list(missing)
-        names = []
-        seen = set()
-        for p in self.missing:
-            name = Path(p).name if p else str(p)
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
-        count = len(names)
-        lines = [
-            f"Pack aborted: {count} external file(s) could not be packed (missing on disk).",
-        ]
-        for name in names[:15]:
-            lines.append(f"  - {name}")
-        if count > 15:
-            lines.append(f"  ... and {count - 15} more")
-        if source_hint:
-            lines.append(f"  ({source_hint})")
-        lines.append(
-            "Remap or remove these textures/fonts in the source .blend files, then pack again."
-        )
         super().__init__("\n".join(lines))
 
 
@@ -1162,7 +1166,8 @@ class IncrementalPacker:
                  frame_start=None, frame_end=None, frame_step=None,
                  temp_blend_path: Optional[Path] = None,
                  original_blend_path: Optional[Path] = None,
-                 max_size_bytes: Optional[int] = None):
+                 max_size_bytes: Optional[int] = None,
+                 exclude_av: bool = False):
         self.workflow = workflow
         self.target_path = target_path
         self.enable_nla = enable_nla
@@ -1174,6 +1179,8 @@ class IncrementalPacker:
         self.temp_blend_path = temp_blend_path  # Temp file used as source (should be copied directly to root)
         self.original_blend_path = original_blend_path  # Original blend file path (for cache lookup)
         self.max_size_bytes = max_size_bytes  # Project size limit in bytes (None = 2GB)
+        # When True, skip video/audio entirely from the pack (copy + ZIP)
+        self.exclude_av = exclude_av
         
         # State tracking
         self.phase = 'INIT'
@@ -1209,7 +1216,8 @@ class IncrementalPacker:
         
         # Pack linked issues tracking
         self.oversized_files_all = []  # Collect all oversized files from pack_linked operations
-        self.missing_files_all = []  # Collect missing textures/fonts that couldn't be packed
+        self.missing_files_all = []  # Collect missing/offline files for end-of-pack report
+        self.missing_summary = ""  # Short UI message after COMPLETE
         
         # Results
         self.file_path = None
@@ -1401,6 +1409,10 @@ class IncrementalPacker:
                 resolved = asset_usage.abspath.resolve()
                 if resolved in self.copied_paths:
                     continue
+                # Skip video/audio entirely when exclude is enabled (ZIP + missing abort)
+                if _is_excluded_media_path(asset_usage.abspath, self.exclude_av):
+                    print(f"[BBP Pack]   Skipping excluded media: {asset_usage.abspath.name}")
+                    continue
                 if not asset_usage.abspath.exists():
                     print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
                     self.missing_on_copy.append(asset_usage.abspath)
@@ -1432,14 +1444,10 @@ class IncrementalPacker:
             
             if self.assets_copied >= total_assets:
                 print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
+                # Collect missing for end-of-pack report (non-fatal; Flamenco-style)
                 if self.missing_on_copy:
-                    print(f"[BBP Pack]   Missing files: {[str(p) for p in self.missing_on_copy[:5]]}...")
-                    err = MissingPackAssetsError(
-                        self.missing_on_copy,
-                        source_hint="found while copying assets into the pack tree",
-                    )
-                    print(f"[BBP Pack] ERROR: {err}")
-                    raise err
+                    self.missing_files_all.extend(self.missing_on_copy)
+                    print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
                 # Check if we need to truncate caches
                 # Skip truncation for COPY_ONLY workflow if caches were filtered during copy
                 caches_filtered_during_copy = (self.copy_only_mode and 
@@ -1648,19 +1656,14 @@ class IncrementalPacker:
                 return ('PACK_LINKED', False)
             else:
                 print(f"[BBP Pack] Finished packing linked libraries")
-                if self.missing_files_all:
-                    err = MissingPackAssetsError(
-                        self.missing_files_all,
-                        source_hint="found while packing linked libraries",
-                    )
-                    print(f"[BBP Pack] ERROR: {err}")
-                    raise err
                 self.phase = 'COMPLETE'
                 return ('COMPLETE', False)
         
         elif self.phase == 'COMPLETE':
             print(f"[BBP Pack] Pack process completed successfully!")
             print(f"[BBP Pack] Output directory: {self.target_path}")
+            # Flamenco-style: finish OK even with offline files; surface the list for the user
+            self.missing_summary = _log_missing_assets_summary(self.missing_files_all)
             
             # Determine file path for submission
             if self.copy_only_mode:
@@ -1709,9 +1712,15 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     copy_only_mode = workflow == WorkflowMode.COPY_ONLY
     autopack_on_save = not copy_only_mode
     run_pack_linked = not copy_only_mode
+    try:
+        exclude_av = bool(getattr(bpy.context.scene.bbp_pack, "exclude_av", False))
+    except Exception:
+        exclude_av = False
     
     print(f"[BBP Pack] Mode: {'COPY_ONLY' if copy_only_mode else 'PACK_AND_SAVE'}")
     print(f"[BBP Pack] Autopack on save: {autopack_on_save}, Pack linked: {run_pack_linked}")
+    if exclude_av:
+        print(f"[BBP Pack] Exclude video/audio enabled (omitted from pack)")
     
     dead_assets = find_dead_unc_assets()
     if dead_assets:
@@ -1840,6 +1849,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             except ValueError:
                 asset_relpath = compute_target_relpath(resolved, common_root)
             
+            if _is_excluded_media_path(asset_usage.abspath, exclude_av):
+                print(f"[BBP Pack]   Skipping excluded media: {asset_usage.abspath.name}")
+                continue
             if not asset_usage.abspath.exists():
                 print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
                 missing_on_copy.append(asset_usage.abspath)
@@ -1861,14 +1873,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 missing_on_copy.append(asset_usage.abspath)
     
     print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
+    missing_files_report = list(missing_on_copy)
     if missing_on_copy:
-        print(f"[BBP Pack]   Missing files: {[str(p) for p in missing_on_copy[:5]]}...")  # First 5
-        err = MissingPackAssetsError(
-            missing_on_copy,
-            source_hint="found while copying assets into the pack tree",
-        )
-        print(f"[BBP Pack] ERROR: {err}")
-        raise err
+        print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in missing_on_copy[:5]]}...")
     
     # Remap library paths
     print(f"[BBP Pack] Finding blend dependencies...")
@@ -1967,15 +1974,10 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     if issues:
                         print(f"[BBP Pack]     Note: {', '.join(issues)} linked files could not be packed")
             print(f"[BBP Pack] Finished packing linked libraries")
-            if missing_files_all:
-                err = MissingPackAssetsError(
-                    missing_files_all,
-                    source_hint="found while packing linked libraries",
-                )
-                print(f"[BBP Pack] ERROR: {err}")
-                raise err
+            missing_files_report.extend(missing_files_all)
     
     print(f"[BBP Pack] Pack process completed successfully!")
+    _log_missing_assets_summary(missing_files_report)
     print(f"[BBP Pack] Output directory: {target_path}")
     
     # Determine file path for submission
@@ -2182,6 +2184,7 @@ class BBP_OT_pack_zip(Operator):
                         return not pack_settings.is_packing
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
+                    exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
                     self._packer = IncrementalPacker(
                         WorkflowMode.COPY_ONLY,
                         target_path=None,
@@ -2194,6 +2197,7 @@ class BBP_OT_pack_zip(Operator):
                         temp_blend_path=self._temp_blend_path,
                         original_blend_path=Path(self._original_filepath) if self._original_filepath else None,
                         max_size_bytes=max_size_bytes,
+                        exclude_av=exclude_av,
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -2246,7 +2250,7 @@ class BBP_OT_pack_zip(Operator):
                         print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {str(e)}"
+                        self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {str(e)}"
                         self._cleanup(context, cancelled=True)
                         self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
@@ -2355,13 +2359,13 @@ class BBP_OT_pack_zip(Operator):
                         return not pack_settings.is_packing
                     
                     try:
-                        exclude_video = getattr(context.scene.bbp_pack, 'exclude_video_from_zip', False)
+                        exclude_av = getattr(context.scene.bbp_pack, 'exclude_av', False)
                         create_zip_from_directory(
                             self._target_path,
                             self._zip_path,
                             progress_callback=zip_progress_callback,
                             cancel_check=zip_cancel_check,
-                            exclude_video=exclude_video,
+                            exclude_av=exclude_av,
                         )
                         
                         # Rename ZIP to use blend file name, with suffix only if there's a conflict
@@ -2504,20 +2508,26 @@ class BBP_OT_pack_zip(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     pack_settings.pack_progress = 100.0
-                    pack_settings.pack_status_message = "Packing complete!"
+                    missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    pack_settings.pack_status_message = (
+                        f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
+                    )
                     
                     # Small delay to show completion
                     import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, self._message if self._message else f"File saved to: {self._output_path}")
+                    saved_msg = self._message if self._message else f"File saved to: {self._output_path}"
+                    self.report({'INFO'}, saved_msg)
+                    if missing_summary:
+                        self.report({'WARNING'}, missing_summary)
                     return {'FINISHED'}
                 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {type(e).__name__}: {str(e)}"
+                self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {type(e).__name__}: {str(e)}"
                 self._cleanup(context, cancelled=True)
                 self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
@@ -2718,6 +2728,7 @@ class BBP_OT_pack_blend(Operator):
                         return not pack_settings.is_packing
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
+                    exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
                     self._packer = IncrementalPacker(
                         WorkflowMode.PACK_AND_SAVE,
                         target_path=None,
@@ -2730,6 +2741,7 @@ class BBP_OT_pack_blend(Operator):
                         temp_blend_path=self._temp_blend_path,
                         original_blend_path=Path(self._original_filepath) if self._original_filepath else None,
                         max_size_bytes=max_size_bytes,
+                        exclude_av=exclude_av,
                     )
                     
                     self._phase = 'PACKING_INIT'
@@ -2788,7 +2800,7 @@ class BBP_OT_pack_blend(Operator):
                         print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {str(e)}"
+                        self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {str(e)}"
                         self._cleanup(context, cancelled=True)
                         self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
@@ -2896,20 +2908,26 @@ class BBP_OT_pack_blend(Operator):
                 
                 elif self._phase == 'COMPLETE':
                     pack_settings.pack_progress = 100.0
-                    pack_settings.pack_status_message = "Packing complete!"
+                    missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    pack_settings.pack_status_message = (
+                        f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
+                    )
                     
                     # Small delay to show completion
                     import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
-                    self.report({'INFO'}, self._message if self._message else f"File saved to: {self._output_path}")
+                    saved_msg = self._message if self._message else f"File saved to: {self._output_path}"
+                    self.report({'INFO'}, saved_msg)
+                    if missing_summary:
+                        self.report({'WARNING'}, missing_summary)
                     return {'FINISHED'}
                 
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self._error = str(e) if isinstance(e, (DeadUncAssetError, MissingPackAssetsError)) else f"Packing failed: {type(e).__name__}: {str(e)}"
+                self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {type(e).__name__}: {str(e)}"
                 self._cleanup(context, cancelled=True)
                 self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
@@ -3043,6 +3061,7 @@ class BBP_OT_pack_zip_sync(Operator):
             pack_settings.pack_progress = 15.0 + (pct * 0.46)
             pack_settings.pack_status_message = msg
         max_size_bytes = _get_project_size_limit_bytes(context)
+        exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
         packer = IncrementalPacker(
             WorkflowMode.COPY_ONLY,
             target_path=None,
@@ -3055,6 +3074,7 @@ class BBP_OT_pack_zip_sync(Operator):
             temp_blend_path=temp_blend_path,
             original_blend_path=Path(original_filepath) if original_filepath else None,
             max_size_bytes=max_size_bytes,
+            exclude_av=exclude_av,
         )
         try:
             while True:
@@ -3075,8 +3095,8 @@ class BBP_OT_pack_zip_sync(Operator):
         au.library_abspath.cache_clear()
         au.library_abspath = _orig_lib_abspath
         zip_path = target_path.parent / f"{target_path.name}.zip"
-        exclude_video = getattr(pack_settings, 'exclude_video_from_zip', False)
-        create_zip_from_directory(target_path, zip_path, cancel_check=lambda: False, exclude_video=exclude_video)
+        exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
+        create_zip_from_directory(target_path, zip_path, cancel_check=lambda: False, exclude_av=exclude_av)
         desired_zip_name = f"{blend_name}.zip"
         desired_zip_path = output_dir / desired_zip_name
         pack_indicator = target_path.name

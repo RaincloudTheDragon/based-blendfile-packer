@@ -55,7 +55,7 @@ class BBP_PT_output_panel(Panel):
 
         col.operator("bbp.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
         row = layout.row()
-        row.prop(pack_settings, "exclude_video_from_zip", text="Exclude video/audio from ZIP")
+        row.prop(pack_settings, "exclude_av", text="Exclude video/audio")
         col.operator("bbp.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
 
         layout.separator()

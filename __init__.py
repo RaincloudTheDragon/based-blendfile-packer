@@ -55,9 +55,9 @@ class BBP_PG_pack_settings(bpy.types.PropertyGroup):
         min=1,
     )
 
-    exclude_video_from_zip: bpy.props.BoolProperty(
-        name="Exclude video/audio from ZIP",
-        description="Exclude video and audio files (e.g. mp4, avi, mov, wav, mp3) from the ZIP pack",
+    exclude_av: bpy.props.BoolProperty(
+        name="Exclude video/audio",
+        description="Exclude video and audio files from the pack.",
         default=False,
     )
 
