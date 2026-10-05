@@ -46,7 +46,13 @@ class BBP_PT_output_panel(Panel):
         if pack_settings.is_packing:
             box = layout.box()
             box.label(text=pack_settings.pack_status_message, icon='TIME')
-            box.prop(pack_settings, "pack_progress", text="Progress", slider=True)
+            # Display-only loading bar (not an editable slider).
+            factor = max(0.0, min(1.0, float(pack_settings.pack_progress) / 100.0))
+            progress_row = box.row(align=True)
+            progress_row.scale_y = 1.5
+            progress_row.progress(
+                factor=factor, type='BAR', text=f"{int(round(factor * 100.0))}%"
+            )
             layout.separator()
 
         col = layout.column()
