@@ -102,6 +102,12 @@ class BBP_PG_pack_settings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    cancel_requested: bpy.props.BoolProperty(
+        name="Cancel Requested",
+        description="Set by Cancel / Esc to abort the packing modal on the next tick",
+        default=False,
+    )
+
     pack_progress: bpy.props.FloatProperty(
         name="Pack Progress",
         description="Progress percentage for packing operations",

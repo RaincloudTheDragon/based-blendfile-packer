@@ -2033,6 +2033,7 @@ class BBP_OT_pack_zip(Operator):
         
         # Initialize progress properties
         pack_settings.is_packing = True
+        pack_settings.cancel_requested = False
         pack_settings.pack_progress = 0.0
         pack_settings.pack_status_message = "Initializing..."
         
@@ -2079,9 +2080,9 @@ class BBP_OT_pack_zip(Operator):
         if event.type not in ('TIMER', 'MOUSEMOVE', 'WINDOW_DEACTIVATE'):
             print(f"[BBP Pack] DEBUG: Modal event received: type={event.type}, value={getattr(event, 'value', 'N/A')}")
         
-        # Handle ESC key to cancel
-        if event.type == 'ESC':
-            print(f"[BBP Pack] DEBUG: ESC key pressed, cancelling")
+        # Handle Esc / Cancel button
+        if event.type == 'ESC' or pack_settings.cancel_requested:
+            print(f"[BBP Pack] DEBUG: Cancel requested, cancelling")
             self._cleanup(context, cancelled=True)
             self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
@@ -2176,8 +2177,8 @@ class BBP_OT_pack_zip(Operator):
                                 area.tag_redraw()
                     
                     def cancel_check():
-                        """Check if user wants to cancel."""
-                        return not pack_settings.is_packing
+                        """True when Cancel / Esc requested."""
+                        return bool(pack_settings.cancel_requested)
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
                     exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
@@ -2351,8 +2352,8 @@ class BBP_OT_pack_zip(Operator):
                                 area.tag_redraw()
                     
                     def zip_cancel_check():
-                        """Check if user wants to cancel."""
-                        return not pack_settings.is_packing
+                        """True when Cancel / Esc requested."""
+                        return bool(pack_settings.cancel_requested)
                     
                     try:
                         exclude_av = getattr(context.scene.bbp_pack, 'exclude_av', False)
@@ -2527,7 +2528,8 @@ class BBP_OT_pack_zip(Operator):
                 self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
         
-        return {'RUNNING_MODAL'}
+        # Let UI clicks reach Cancel / other panels while the timer drives packing.
+        return {'PASS_THROUGH'}
     
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
@@ -2551,6 +2553,7 @@ class BBP_OT_pack_zip(Operator):
         
         # Reset progress properties
         pack_settings.is_packing = False
+        pack_settings.cancel_requested = False
         pack_settings.pack_progress = 0.0
         if cancelled and self._error:
             pack_settings.pack_status_message = self._error
@@ -2606,6 +2609,7 @@ class BBP_OT_pack_blend(Operator):
         
         # Initialize progress properties
         pack_settings.is_packing = True
+        pack_settings.cancel_requested = False
         pack_settings.pack_progress = 0.0
         pack_settings.pack_status_message = "Initializing..."
         
@@ -2648,8 +2652,8 @@ class BBP_OT_pack_blend(Operator):
         """Handle modal events and update progress."""
         pack_settings = context.scene.bbp_pack
         
-        # Handle ESC key to cancel
-        if event.type == 'ESC':
+        # Handle Esc / Cancel button
+        if event.type == 'ESC' or pack_settings.cancel_requested:
             self._cleanup(context, cancelled=True)
             self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
@@ -2726,8 +2730,8 @@ class BBP_OT_pack_blend(Operator):
                                 area.tag_redraw()
                     
                     def cancel_check():
-                        """Check if user wants to cancel."""
-                        return not pack_settings.is_packing
+                        """True when Cancel / Esc requested."""
+                        return bool(pack_settings.cancel_requested)
                     
                     max_size_bytes = _get_project_size_limit_bytes(context)
                     exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
@@ -2935,7 +2939,8 @@ class BBP_OT_pack_blend(Operator):
                 self.report({'ERROR'}, self._error.split('\n')[0])
                 return {'CANCELLED'}
         
-        return {'RUNNING_MODAL'}
+        # Let UI clicks reach Cancel / other panels while the timer drives packing.
+        return {'PASS_THROUGH'}
     
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
@@ -2959,6 +2964,7 @@ class BBP_OT_pack_blend(Operator):
         
         # Reset progress properties
         pack_settings.is_packing = False
+        pack_settings.cancel_requested = False
         pack_settings.pack_progress = 0.0
         if cancelled and self._error:
             pack_settings.pack_status_message = self._error
@@ -3124,12 +3130,32 @@ class BBP_OT_pack_zip_sync(Operator):
         return {'FINISHED'}
 
 
+
+class BBP_OT_cancel_pack(Operator):
+    """Request cancel of the packing modal (Cancel button / Esc)."""
+    bl_idname = "bbp.cancel_pack"
+    bl_label = "Cancel Pack"
+    bl_description = "Cancel the packing operation in progress"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        pack = getattr(context.scene, "bbp_pack", None)
+        return bool(pack and pack.is_packing)
+
+    def execute(self, context):
+        context.scene.bbp_pack.cancel_requested = True
+        self.report({'INFO'}, "Cancelling pack…")
+        return {'FINISHED'}
+
+
 def register():
     """Register operators."""
     from ..utils import compat
     compat.safe_register_class(BBP_OT_pack_zip)
     compat.safe_register_class(BBP_OT_pack_zip_sync)
     compat.safe_register_class(BBP_OT_pack_blend)
+    compat.safe_register_class(BBP_OT_cancel_pack)
     compat.safe_register_class(BBP_OT_enable_nla)
 
 
@@ -3137,6 +3163,7 @@ def unregister():
     """Unregister operators."""
     from ..utils import compat
     compat.safe_unregister_class(BBP_OT_enable_nla)
+    compat.safe_unregister_class(BBP_OT_cancel_pack)
     compat.safe_unregister_class(BBP_OT_pack_blend)
     compat.safe_unregister_class(BBP_OT_pack_zip_sync)
     compat.safe_unregister_class(BBP_OT_pack_zip)

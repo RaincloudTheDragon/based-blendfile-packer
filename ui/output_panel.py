@@ -53,13 +53,18 @@ class BBP_PT_output_panel(Panel):
             progress_row.progress(
                 factor=factor, type='BAR', text=f"{int(round(factor * 100.0))}%"
             )
+            row = box.row()
+            row.scale_y = 1.5
+            row.operator("bbp.cancel_pack", text="Cancel", icon='X')
             layout.separator()
 
         col = layout.column()
         col.scale_y = 1.5
+        col.enabled = not pack_settings.is_packing
 
         col.operator("bbp.pack_zip", text="Pack as ZIP (for scenes with caches)", icon='PACKAGE')
         row = layout.row()
+        row.enabled = not pack_settings.is_packing
         row.prop(pack_settings, "exclude_av", text="Exclude video/audio")
         col.operator("bbp.pack_blend", text="Pack as Blend", icon='FILE_BLEND')
 
