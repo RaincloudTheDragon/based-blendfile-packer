@@ -15,7 +15,7 @@ import bpy
 def apply_frame_range_to_blend(blend_path: Path, frame_start: int, frame_end: int, frame_step: int) -> None:
     """
     Apply frame range settings to a blend file using subprocess.
-    
+
     Args:
         blend_path: Path to the blend file to modify
         frame_start: Start frame value
@@ -47,11 +47,11 @@ print(f'Applied frame range {frame_start}-{frame_end} (step {frame_step}) to all
 def save_current_blend_with_frame_range(pack_settings, temp_dir: Optional[Path] = None) -> Tuple[Path, int, int, int]:
     """
     Save current blend state to a temporary file and apply frame range from pack_settings.
-    
+
     Args:
         pack_settings: Submit settings containing frame range configuration
         temp_dir: Optional temporary directory (if None, creates a new one)
-    
+
     Returns:
         Tuple of (temp_blend_path, frame_start, frame_end, frame_step)
     """
@@ -102,7 +102,7 @@ _MEDIA_EXTENSIONS = frozenset({
 
 def create_zip_from_directory(directory: Path, output_zip: Path, progress_callback=None, cancel_check=None, exclude_av: bool = False) -> None:
     """Create a ZIP file from a directory.
-    
+
     Args:
         directory: Directory to zip
         output_zip: Output ZIP file path

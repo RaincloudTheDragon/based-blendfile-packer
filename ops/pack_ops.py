@@ -405,17 +405,16 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
 def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end: int, frame_step: int) -> int:
     """
     Remove cache files outside the specified frame range.
-    
+
     This helps reduce ZIP size by only including cache files for frames that will be rendered.
-    
+
     Handles common cache naming patterns:
     - Numbered sequences: frame_0001.vdb, frame_0002.vdb, cache_fluid_0042.bphys.gz, etc.
     - Physics/simulation: fluid_####, cloth_####, softbody_####, particles_####, pointcache_####
     - Only keep files where extracted frame number is within [frame_start, frame_end] and matches frame_step
-    
-    If no files would remain after truncation (e.g. naming not recognized or all outside range),
-    no files are deleted so the cache is not emptied by mistake.
-    
+
+    If no files would remain after truncation (e.g. naming not recognized or all outside range), no files are deleted so the cache is not emptied by mistake.
+
     Returns number of files removed.
     """
     import re
@@ -466,12 +465,12 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
 
 def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tuple[str, str, int]:
     """Run a Python script in a Blender subprocess.
-    
+
     Args:
         script: Python script to execute
         blend_path: Path to blend file to process
         timeout: Timeout in seconds (default 300 = 5 minutes)
-    
+
     Returns:
         Tuple of (stdout, stderr, returncode)
     """
@@ -889,11 +888,11 @@ def _get_project_size_limit_bytes(context=None):
 
 def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None) -> tuple[list[Path], list[Path]]:
     """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
-    
+
     Args:
         blend_path: Path to the blend file.
         max_size_bytes: Max size in bytes for a single linked file (over this = oversized). None = 2GB.
-    
+
     Returns:
         Tuple of (missing_files: list[Path], oversized_files: list[Path])
         - missing_files: Files that don't exist and couldn't be packed
@@ -1223,7 +1222,7 @@ class IncrementalPacker:
     def process_batch(self, batch_size: int = 20) -> Tuple[str, bool]:
         """
         Process one batch of work.
-        
+
         Returns:
             Tuple of (next_phase, is_complete)
             - next_phase: Next phase name to continue with
@@ -1316,8 +1315,7 @@ class IncrementalPacker:
             
             current_blend_abspath = self.top_level_blend_abs
             
-            # If this is a temp file, copy it directly to target root with just its filename
-            # This avoids the DRIVE_C path structure issue
+            # If this is a temp file, copy it directly to target root with just its filename. This avoids the DRIVE_C path structure issue
             is_temp_file = (self.temp_blend_path and 
                           current_blend_abspath.resolve() == self.temp_blend_path.resolve())
             
@@ -1378,8 +1376,7 @@ class IncrementalPacker:
                     resolved = asset_usage.abspath.resolve()
                     if resolved in self.copied_paths or resolved in seen_resolved:
                         continue
-                    # Skip cache directories: already copied in copy_blend_caches from blend dir;
-                    # including them here would try UNC path and fail with PermissionError.
+                    # Skip cache directories: already copied in copy_blend_caches from blend dir; including them here would try UNC path and fail with PermissionError.
                     name = asset_usage.abspath.name
                     if name.startswith("blendcache_") or name.startswith("cache_") or (
                         len(asset_usage.abspath.parts) >= 2 and asset_usage.abspath.parts[-2] == "bakes"
@@ -1445,8 +1442,7 @@ class IncrementalPacker:
                 if self.missing_on_copy:
                     self.missing_files_all.extend(self.missing_on_copy)
                     print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
-                # Check if we need to truncate caches
-                # Skip truncation for COPY_ONLY workflow if caches were filtered during copy
+                # Check if we need to truncate caches. Skip truncation for COPY_ONLY workflow if caches were filtered during copy
                 caches_filtered_during_copy = (self.copy_only_mode and 
                                              self.frame_start is not None and 
                                              self.frame_end is not None and 
@@ -1687,12 +1683,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                  progress_callback=None, cancel_check=None) -> Tuple[Path, Optional[Path]]:
     """
     Main packing function.
-    
+
     Args:
         workflow: Either 'copy-only' or 'pack-and-save'
         target_path: Target directory (if None, uses temp directory)
         enable_nla: Whether to enable NLA tracks
-    
+
     Returns:
         Tuple of (target_path: Path, file_path: Optional[Path])
         - target_path: Path to the packed output directory
@@ -1980,8 +1976,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     # Determine file path for submission
     file_path = None
     if copy_only_mode:
-        # For copy-only, we'll create ZIP later in the operator
-        # Return None here, ZIP will be created in operator
+        # For copy-only, we'll create ZIP later in the operator. Return None here, ZIP will be created in operator
         pass
     else:
         # For pack-and-save, return the main target blend file
@@ -2149,8 +2144,7 @@ class BBP_OT_pack_zip(Operator):
                     print(f"[BBP Pack] DEBUG: Temp file exists: {self._temp_blend_path.exists() if self._temp_blend_path else 'N/A'}")
                     print(f"[BBP Pack] DEBUG: Current bpy.data.filepath: {bpy.data.filepath}")
                     
-                    # Temporarily override library_abspath to use temp file instead of opening it
-                    # This avoids invalidating the operator instance
+                    # Temporarily override library_abspath to use temp file instead of opening it. This avoids invalidating the operator instance
                     import functools
 
                     self._original_library_abspath = au.library_abspath
@@ -2370,8 +2364,7 @@ class BBP_OT_pack_zip(Operator):
                             exclude_av=exclude_av,
                         )
                         
-                        # Rename ZIP to use blend file name, with suffix only if there's a conflict
-                        # Extract blend file name
+                        # Rename ZIP to use blend file name, with suffix only if there's a conflict. Extract blend file name
                         if self._original_filepath:
                             blend_name = Path(self._original_filepath).stem
                         elif self._temp_blend_path:
@@ -2384,8 +2377,7 @@ class BBP_OT_pack_zip(Operator):
                         desired_zip_path = self._output_dir / desired_zip_name
                         
                         if desired_zip_path.exists():
-                            # File conflict - add suffix with pack indicator
-                            # Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "bbp_pack_0t2v99gf")
+                            # File conflict - add suffix with pack indicator. Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "bbp_pack_0t2v99gf")
                             pack_indicator = self._target_path.name
                             if pack_indicator.startswith("bbp_pack_"):
                                 pack_indicator = pack_indicator[len("bbp_pack_"):]
@@ -2702,8 +2694,7 @@ class BBP_OT_pack_blend(Operator):
                     pack_settings.pack_progress = 12.0
                     pack_settings.pack_status_message = "Preparing for packing..."
                     
-                    # Temporarily override library_abspath to use temp file instead of opening it
-                    # This avoids invalidating the operator instance
+                    # Temporarily override library_abspath to use temp file instead of opening it. This avoids invalidating the operator instance
                     import functools
 
                     self._original_library_abspath = au.library_abspath

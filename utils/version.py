@@ -1,8 +1,7 @@
 """
 Version detection and comparison utilities.
 
-Supported targets: Blender 4.5 LTS (BAT v1) and Blender 5.2 LTS (BAT v2).
-Minimum supported version: Blender 4.5.0.
+Supported targets: Blender 4.5 LTS (BAT v1) and Blender 5.2 LTS (BAT v2). Minimum supported version: Blender 4.5.0.
 """
 
 import bpy
@@ -65,8 +64,7 @@ def get_version_category():
     Return a short version label for the current Blender build.
 
     Returns:
-        ``4.5`` for the 4.5 LTS line, ``5.2+`` for 5.2 LTS and newer, or
-        ``major.minor`` as a fallback.
+        ``4.5`` for the 4.5 LTS line, ``5.2+`` for 5.2 LTS and newer, or ``major.minor`` as a fallback.
     """
     version = get_blender_version()
     major, minor = version[0], version[1]

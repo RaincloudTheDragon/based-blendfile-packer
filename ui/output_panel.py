@@ -1,6 +1,5 @@
 """
-Output panel UI for BasedBlendfilePacker.
-Located in the Output tab, similar to Flamenco addon.
+Output panel UI for BasedBlendfilePacker. Located in the Output tab, similar to Flamenco addon.
 """
 
 import bpy

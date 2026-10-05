@@ -8,16 +8,12 @@ Supported Blender targets and BAT backends:
 - **4.5 LTS** — BAT v1, vendored under ``vendor/bat_v1/`` (standalone blend parsing).
 - **5.2 LTS** — BAT v2, bundled extension wheel (in-Blender ``file_usage`` API).
 
-Both backends are always shipped: the v2 wheel is only installed on Blender 5.1+
-(Python 3.13), so it cannot conflict with the vendored v1 tree on 4.5 LTS.
+Both backends are always shipped: the v2 wheel is only installed on Blender 5.1+ (Python 3.13), so it cannot conflict with the vendored v1 tree on 4.5 LTS.
 
-Packed datablocks are filtered locally so their filepaths are not copied or treated as
-missing:
+Packed datablocks are filtered locally so their filepaths are not copied or treated as missing:
 
 - Classic ``packed_file`` (images/fonts/libs/…).
-- Blender 5.0+ packed-linked IDs (``ID.is_linked_packed``) stored in archive libraries
-  (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon; source path may
-  be dead while data lives in the current .blend.
+- Blender 5.0+ packed-linked IDs (``ID.is_linked_packed``) stored in archive libraries (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon; source path may be dead while data lives in the current .blend.
 
 Workaround until BAT v2 skips these in tracing (open upstream PR).
 """
@@ -169,9 +165,7 @@ def _bat_v2_project_root() -> Path:
 def _v2_dependency_repo():
     """Build a BAT v2 dependency repo for discovery only (skip pack-path clustering).
 
-    ``dependencies_of_current_blendfile()`` also runs pack-path clustering, which
-    BBP does not need for ``find()`` and which fails when the temp-blend override
-    disagrees with ``bpy.data.filepath`` (``Could not shorten these paths: ['.']``).
+    ``dependencies_of_current_blendfile()`` also runs pack-path clustering, which BBP does not need for ``find()`` and which fails when the temp-blend override disagrees with ``bpy.data.filepath`` (``Could not shorten these paths: ['.']``).
     """
     bat_fu = _bat_v2_file_usage()
     root = _bat_v2_project_root()
@@ -199,9 +193,7 @@ def _library_for_blend_path(blend_path: Path) -> Library | None:
 def _library_is_packed(lib: Library | None) -> bool:
     """True when a library's data is already stored in the current .blend.
 
-    Covers classic ``packed_file`` and Blender 5.0+ packed-linked archive libs
-    (``is_archive`` / parent with ``archive_libraries``). Archive parents keep a
-    stale source filepath even though IDs live in the archive child.
+    Covers classic ``packed_file`` and Blender 5.0+ packed-linked archive libs (``is_archive`` / parent with ``archive_libraries``). Archive parents keep a stale source filepath even though IDs live in the archive child.
     """
     if lib is None:
         return False
@@ -247,8 +239,7 @@ def _path_variants(filepath: str) -> set[Path]:
 def _packed_external_paths() -> set[Path]:
     """Resolved filepaths belonging to packed / packed-linked datablocks.
 
-    Local workaround: BAT v2 still reports these paths; they must not be treated as
-    external copy/missing targets.
+    Local workaround: BAT v2 still reports these paths; they must not be treated as external copy/missing targets.
     """
     packed: set[Path] = set()
     collections = [

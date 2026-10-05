@@ -1,8 +1,7 @@
 """
 Compatibility layer for handling differences across supported Blender versions.
 
-Supported targets: Blender 4.5 LTS and Blender 5.2 LTS.
-Minimum supported: Blender 4.5.0.
+Supported targets: Blender 4.5 LTS and Blender 5.2 LTS. Minimum supported: Blender 4.5.0.
 """
 
 import bpy
@@ -13,10 +12,10 @@ from . import version
 def safe_register_class(cls):
     """
     Safely register a class, handling any version-specific registration issues.
-    
+
     Args:
         cls: The class to register
-    
+
     Returns:
         bool: True if registration succeeded, False otherwise
     """
@@ -31,10 +30,10 @@ def safe_register_class(cls):
 def safe_unregister_class(cls):
     """
     Safely unregister a class, handling any version-specific unregistration issues.
-    
+
     Args:
         cls: The class to unregister
-    
+
     Returns:
         bool: True if unregistration succeeded, False otherwise
     """
@@ -49,7 +48,7 @@ def safe_unregister_class(cls):
 def get_addon_prefs():
     """
     Get the addon preferences instance, compatible across versions.
-    
+
     Returns:
         AddonPreferences or None: The addon preferences instance if found
     """
@@ -68,10 +67,10 @@ def get_addon_prefs():
 def is_library_or_override(datablock):
     """
     Check if a datablock is library-linked or an override.
-    
+
     Args:
         datablock: The datablock to check
-    
+
     Returns:
         bool: True if the datablock is library-linked or an override, False otherwise
     """
@@ -89,10 +88,10 @@ def is_library_or_override(datablock):
 def get_file_path_map(include_libraries=False):
     """
     Get file path map, handling version differences.
-    
+
     Args:
         include_libraries (bool): Whether to include library paths
-    
+
     Returns:
         dict: File path map
     """
@@ -106,7 +105,7 @@ def get_file_path_map(include_libraries=False):
 def get_user_map():
     """
     Get user map, handling version differences.
-    
+
     Returns:
         dict: User map
     """

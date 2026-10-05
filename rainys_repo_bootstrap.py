@@ -16,8 +16,7 @@ def ensure_rainys_extensions_repo(_deferred: bool = False) -> None:
     """
     Ensure the Rainy's Extensions repository is registered in Blender.
 
-    Safe to import and call from multiple add-ons; the helper guards against doing the
-    work more than once per Blender session.
+    Safe to import and call from multiple add-ons; the helper guards against doing the work more than once per Blender session.
     """
     global _BOOTSTRAP_DONE
 
