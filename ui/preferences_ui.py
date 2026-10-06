@@ -58,6 +58,13 @@ class BBP_AddonPreferences(AddonPreferences):
         update=lambda self, context: _save_prefs_sidecar(self),
     )
 
+    verbose_pack_log: BoolProperty(
+        name="Verbose Pack Log",
+        description="Print detailed pack diagnostics (BAT/UDIM gaps, search roots, recovery stats, phase timings) to the system console",
+        default=True,
+        update=lambda self, context: _save_prefs_sidecar(self),
+    )
+
     def draw(self, context):
         layout = self.layout
 
@@ -70,6 +77,12 @@ class BBP_AddonPreferences(AddonPreferences):
         box = layout.box()
         box.label(text="Compatibility:", icon='PLUGIN')
         box.prop(self, "defer_to_flamenco_bat")
+
+        layout.separator()
+
+        box = layout.box()
+        box.label(text="Diagnostics:", icon='CONSOLE')
+        box.prop(self, "verbose_pack_log")
 
         layout.separator()
 

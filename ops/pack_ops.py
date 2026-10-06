@@ -3,8 +3,11 @@ Packing operations for BasedBlendfilePacker.
 """
 
 import os
+import re
 import shutil
 import tempfile
+import time
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple
@@ -17,11 +20,175 @@ from ..utils import bat_asset_usage as au
 from ..utils import wm_progress
 from .export_ops import _MEDIA_EXTENSIONS
 
+# UDIM tile filenames (e.g. foo.1001.png) and Blender's <UDIM> token.
+_UDIM_TILE_NAME_RE = re.compile(r"\.(10\d{2})\.[A-Za-z0-9]+$")
+
 
 class WorkflowMode:
     """Workflow mode constants."""
     COPY_ONLY = "copy-only"
     PACK_AND_SAVE = "pack-and-save"
+
+
+def _verbose_pack_log_enabled() -> bool:
+    """True when Preferences → Verbose Pack Log is on (default True)."""
+    try:
+        from ..ui.preferences_ui import BBP_AddonPreferences
+        addon = bpy.context.preferences.addons.get(BBP_AddonPreferences.bl_idname)
+        if addon and addon.preferences:
+            return bool(getattr(addon.preferences, "verbose_pack_log", True))
+    except Exception:
+        pass
+    return True
+
+
+def _pack_diag(message: str, *, verbose_only: bool = False) -> None:
+    """Pack diagnostic line; verbose_only lines need the prefs toggle."""
+    if verbose_only and not _verbose_pack_log_enabled():
+        return
+    print(f"[BBP Pack] DIAG: {message}")
+
+
+def _pack_debug(message: str) -> None:
+    """Modal/operator chatter; only when Verbose Pack Log is on."""
+    if not _verbose_pack_log_enabled():
+        return
+    print(f"[BBP Pack] DEBUG: {message}")
+
+
+def _path_looks_udim(path: Path) -> bool:
+    """True when path is a UDIM token path or a concrete .10xx tile filename."""
+    name = path.name if path else ""
+    s = str(path)
+    return "<UDIM>" in s.upper() or "<udim>" in s or bool(_UDIM_TILE_NAME_RE.search(name))
+
+
+def _diag_summarize_asset_usages(asset_usages: dict) -> None:
+    """Log BAT discovery stats: per-lib counts, suffixes, UDIM-looking paths."""
+    by_suffix: Counter = Counter()
+    udim_paths: list[Path] = []
+    total = 0
+    missing_disk = 0
+    for lib, links in asset_usages.items():
+        lib_label = "MAIN" if lib is None else getattr(lib, "name", str(lib))
+        n = len(links)
+        total += n
+        exist_n = sum(1 for a in links if a.abspath.exists())
+        _pack_diag(f"BAT lib {lib_label}: {n} asset(s), {exist_n} on disk", verbose_only=True)
+        for a in links:
+            by_suffix[a.abspath.suffix.lower() or "(none)"] += 1
+            if _path_looks_udim(a.abspath):
+                udim_paths.append(a.abspath)
+            if not a.abspath.exists():
+                missing_disk += 1
+    top_suffixes = ", ".join(f"{s}:{c}" for s, c in by_suffix.most_common(12))
+    _pack_diag(f"BAT total: {total} path(s) across {len(asset_usages)} lib group(s); missing on disk at discover: {missing_disk}")
+    _pack_diag(f"BAT suffixes: {top_suffixes}", verbose_only=True)
+    _pack_diag(f"BAT UDIM-looking paths: {len(udim_paths)}")
+    for p in udim_paths[:20]:
+        _pack_diag(f"  UDIM/BAT: {p}", verbose_only=True)
+    if len(udim_paths) > 20:
+        _pack_diag(f"  ... and {len(udim_paths) - 20} more UDIM-looking BAT paths", verbose_only=True)
+
+
+def _udim_tile_paths(abs_fp: Path, tile_numbers: list) -> list[Path]:
+    """Expand a tokenized or concrete image path into per-tile file paths."""
+    out: list[Path] = []
+    name = abs_fp.name
+    for n in tile_numbers:
+        if n is None:
+            continue
+        if "<UDIM>" in name or "<udim>" in name:
+            out.append(abs_fp.parent / name.replace("<UDIM>", str(n)).replace("<udim>", str(n)))
+            continue
+        m = re.match(r"^(.*)\.(10\d{2})(\.[^.]+)$", name)
+        if m:
+            out.append(abs_fp.parent / f"{m.group(1)}.{n}{m.group(3)}")
+        else:
+            # name.<UDIM>.ext style without angle brackets already handled; fallback stem.N.ext
+            stem = abs_fp.stem
+            out.append(abs_fp.parent / f"{stem}.{n}{abs_fp.suffix}")
+    return out
+
+
+def _diag_session_udim_gap(asset_usages: dict) -> None:
+    """Compare session TILED/<UDIM> images vs what BAT listed (gap = pack_linked risk)."""
+    bat_names = {a.abspath.name.lower() for links in asset_usages.values() for a in links}
+    bat_resolved = set()
+    for links in asset_usages.values():
+        for a in links:
+            try:
+                bat_resolved.add(a.abspath.resolve())
+            except OSError:
+                bat_resolved.add(a.abspath)
+
+    tiled = []
+    for img in bpy.data.images:
+        fp = getattr(img, "filepath", None) or ""
+        if getattr(img, "source", "") != "TILED" and "<UDIM>" not in fp.upper():
+            continue
+        try:
+            abs_fp = Path(bpy.path.abspath(fp)) if fp else Path()
+        except Exception:
+            abs_fp = Path(fp)
+        tiles = [getattr(t, "number", None) for t in (getattr(img, "tiles", None) or [])]
+        tile_files = _udim_tile_paths(abs_fp, tiles) if tiles and fp else []
+        try:
+            in_bat = abs_fp.resolve() in bat_resolved
+        except OSError:
+            in_bat = abs_fp.name.lower() in bat_names
+        tiles_on_disk = sum(1 for t in tile_files if t.exists())
+        tiles_in_bat = 0
+        for t in tile_files:
+            try:
+                if t.name.lower() in bat_names or (t.exists() and t.resolve() in bat_resolved):
+                    tiles_in_bat += 1
+            except OSError:
+                if t.name.lower() in bat_names:
+                    tiles_in_bat += 1
+        lib = img.library.filepath if img.library else "(local)"
+        tiled.append({
+            "name": img.name,
+            "lib": lib,
+            "tiles": tiles,
+            "tiles_on_disk": tiles_on_disk,
+            "tiles_in_bat": tiles_in_bat,
+            "in_bat": in_bat,
+            "tile_files": tile_files,
+        })
+
+    _pack_diag(f"Session TILED/<UDIM> images: {len(tiled)}")
+    gap = [t for t in tiled if t["tiles_on_disk"] > t["tiles_in_bat"]]
+    _pack_diag(f"UDIM gap (tiles on disk but not in BAT list): {len(gap)} image(s) — these break pack_linked/pack_all")
+    for t in tiled:
+        _pack_diag(
+            f"  TILED '{t['name']}' lib={t['lib']} tiles={t['tiles']} "
+            f"on_disk={t['tiles_on_disk']} in_bat={t['tiles_in_bat']} token_in_bat={t['in_bat']}",
+            verbose_only=True,
+        )
+        if t["tiles_on_disk"] > t["tiles_in_bat"]:
+            for tf in t["tile_files"][:8]:
+                _pack_diag(f"    tile {tf.name}: exists={tf.exists()} in_bat={tf.name.lower() in bat_names}", verbose_only=True)
+
+
+def _diag_copied_udim_tiles(target_path: Path) -> None:
+    """Count concrete UDIM tile files that landed in the pack tree."""
+    if not target_path or not target_path.exists():
+        return
+    n = 0
+    samples = []
+    try:
+        for p in target_path.rglob("*"):
+            if p.is_file() and _UDIM_TILE_NAME_RE.search(p.name):
+                n += 1
+                if len(samples) < 12:
+                    samples.append(p)
+    except OSError as e:
+        _pack_diag(f"UDIM tile scan failed: {e}")
+        return
+    _pack_diag(f"Pack tree concrete UDIM tiles (.10xx.*): {n}")
+    for p in samples:
+        _pack_diag(f"  tile packed: {p.relative_to(target_path)}", verbose_only=True)
 
 
 def _is_excluded_media_path(path: Path, exclude_av: bool) -> bool:
@@ -1200,6 +1367,9 @@ class IncrementalPacker:
         # Stale-path recovery: session-derived roots + basename→hits cache
         self.search_roots: list[Path] = []
         self._recovery_cache: dict = {}
+        self._recovery_hits = 0
+        self._recovery_misses = 0
+        self._recovery_time_s = 0.0
         
         # Blend processing state
         self.blend_deps = None
@@ -1217,9 +1387,27 @@ class IncrementalPacker:
         self.missing_files_all = []  # Collect missing/offline files for end-of-pack report
         self.missing_summary = ""  # Short UI message after COMPLETE
         
+        # Phase timing (for Verbose Pack Log optimization)
+        self._session_t0 = time.perf_counter()
+        self._timed_phase = None
+        self._phase_t0 = self._session_t0
+        
         # Results
         self.file_path = None
         self.error = None
+
+    def _tick_phase_timing(self) -> None:
+        """Log elapsed time when PackSession phase changes (verbose)."""
+        if self._timed_phase is None:
+            self._timed_phase = self.phase
+            self._phase_t0 = time.perf_counter()
+            return
+        if self.phase == self._timed_phase:
+            return
+        elapsed = time.perf_counter() - self._phase_t0
+        _pack_diag(f"Phase {self._timed_phase} took {elapsed:.2f}s", verbose_only=True)
+        self._timed_phase = self.phase
+        self._phase_t0 = time.perf_counter()
     
     def process_batch(self, batch_size: int = 20) -> Tuple[str, bool]:
         """
@@ -1232,6 +1420,8 @@ class IncrementalPacker:
         """
         if self.cancel_check and self.cancel_check():
             raise InterruptedError("Packing cancelled by user")
+
+        self._tick_phase_timing()
         
         if self.phase == 'INIT':
             if self.target_path is None:
@@ -1257,10 +1447,14 @@ class IncrementalPacker:
                 err = DeadUncAssetError(path, kind, name, detail)
                 print(f"[BBP Pack] ERROR: {err}")
                 raise err
+            t_find = time.perf_counter()
             self.asset_usages = au.find()
+            _pack_diag(f"au.find() took {time.perf_counter() - t_find:.2f}s")
             self.top_level_blend_abs = au.library_abspath(None).resolve()
             print(f"[BBP Pack] Found {len(self.asset_usages)} libraries with assets")
             print(f"[BBP Pack] Top-level blend: {self.top_level_blend_abs}")
+            _diag_summarize_asset_usages(self.asset_usages)
+            _diag_session_udim_gap(self.asset_usages)
             self.phase = 'COLLECT_PATHS'
             return ('COLLECT_PATHS', False)
         
@@ -1403,6 +1597,11 @@ class IncrementalPacker:
             self.search_roots = collect_search_roots(self.common_root, existing_for_roots, blend_parent)
             self._recovery_cache = {}
             print(f"[BBP Pack] Stale-path search roots: {len(self.search_roots)}")
+            _pack_diag(f"Search roots ({len(self.search_roots)}):")
+            for r in self.search_roots[:24]:
+                _pack_diag(f"  root: {r}", verbose_only=True)
+            if len(self.search_roots) > 24:
+                _pack_diag(f"  ... and {len(self.search_roots) - 24} more roots", verbose_only=True)
             self.phase = 'COPY_ASSETS'
             return ('COPY_ASSETS', False)
         
@@ -1426,11 +1625,16 @@ class IncrementalPacker:
                     continue
                 src_path = stale_path
                 if not src_path.exists():
+                    t_rec = time.perf_counter()
                     recovered = recover_stale_path(stale_path, self.search_roots, self._recovery_cache)
+                    self._recovery_time_s += time.perf_counter() - t_rec
                     if recovered is None:
+                        self._recovery_misses += 1
                         print(f"[BBP Pack]   WARNING: Asset does not exist: {stale_path}")
                         self.missing_on_copy.append(stale_path)
                         continue
+                    self._recovery_hits += 1
+                    _pack_diag(f"Recovered: {stale_path.name} -> {recovered}", verbose_only=True)
                     src_path = recovered
                 try:
                     src_resolved = src_path.resolve()
@@ -1474,6 +1678,11 @@ class IncrementalPacker:
             
             if self.assets_copied >= total_assets:
                 print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
+                _pack_diag(
+                    f"Stale recovery: hits={self._recovery_hits} misses={self._recovery_misses} "
+                    f"time={self._recovery_time_s:.2f}s cache_keys={len(self._recovery_cache)}"
+                )
+                _diag_copied_udim_tiles(self.target_path)
                 # Collect missing for end-of-pack report (non-fatal; Flamenco-style)
                 if self.missing_on_copy:
                     self.missing_files_all.extend(self.missing_on_copy)
@@ -1590,6 +1799,7 @@ class IncrementalPacker:
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Remapping paths... ({self.remap_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.remap_index + 1}/{len(self.to_remap)}] Remapping paths in: {blend_to_fix.name}")
+                    t_blend = time.perf_counter()
                     unresolved = remap_library_paths(
                         blend_to_fix,
                         self.copy_map,
@@ -1598,6 +1808,7 @@ class IncrementalPacker:
                         ensure_autopack=self.autopack_on_save,
                         search_roots=self.search_roots,
                     )
+                    _pack_diag(f"remap {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s unresolved={len(unresolved or [])}", verbose_only=True)
                     if unresolved:
                         print(f"[BBP Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
                         for up in unresolved[:3]:  # Show first 3
@@ -1630,7 +1841,9 @@ class IncrementalPacker:
                     if self.progress_callback:
                         self.progress_callback(progress_pct, f"Packing assets... ({self.pack_all_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.pack_all_index + 1}/{len(self.to_remap)}] Packing all in: {blend_to_fix.name}")
+                    t_blend = time.perf_counter()
                     pack_all_in_blend(blend_to_fix)
+                    _pack_diag(f"pack_all {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s", verbose_only=True)
                 self.pack_all_index += 1
                 return ('PACK_ALL', False)
             else:
@@ -1659,7 +1872,13 @@ class IncrementalPacker:
                     print(f"[BBP Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
                     print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
+                        t_blend = time.perf_counter()
                         missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=self.max_size_bytes)
+                        _pack_diag(
+                            f"pack_linked {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s "
+                            f"missing={len(missing_files or [])} oversized={len(oversized_files or [])}",
+                            verbose_only=True,
+                        )
                         # Collect missing textures/fonts/libs for a hard abort after all blends
                         if missing_files:
                             self.missing_files_all.extend(missing_files)
@@ -1692,6 +1911,15 @@ class IncrementalPacker:
         elif self.phase == 'COMPLETE':
             print(f"[BBP Pack] Pack process completed successfully!")
             print(f"[BBP Pack] Output directory: {self.target_path}")
+            # Flush last phase timing + session totals for optimization
+            if self._timed_phase is not None:
+                _pack_diag(f"Phase {self._timed_phase} took {time.perf_counter() - self._phase_t0:.2f}s", verbose_only=True)
+            _pack_diag(f"PackSession total wall time: {time.perf_counter() - self._session_t0:.2f}s")
+            _pack_diag(
+                f"Final: copied_paths={len(self.copied_paths)} missing={len(self.missing_files_all)} "
+                f"recovery_hits={self._recovery_hits} blends_to_process={len(self.to_remap or [])}"
+            )
+            _diag_copied_udim_tiles(self.target_path)
             # Flamenco-style: finish OK even with offline files; surface the list for the user
             self.missing_summary = _log_missing_assets_summary(self.missing_files_all)
             
@@ -1767,10 +1995,14 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         progress_callback(5.0, "Finding asset usages...")
     if cancel_check and cancel_check():
         raise InterruptedError("Packing cancelled by user")
+    t_find = time.perf_counter()
     asset_usages = au.find()
+    _pack_diag(f"au.find() took {time.perf_counter() - t_find:.2f}s")
     top_level_blend_abs = au.library_abspath(None).resolve()
     print(f"[BBP Pack] Found {len(asset_usages)} libraries with assets")
     print(f"[BBP Pack] Top-level blend: {top_level_blend_abs}")
+    _diag_summarize_asset_usages(asset_usages)
+    _diag_session_udim_gap(asset_usages)
     
     # Collect all file paths
     print(f"[BBP Pack] Collecting all file paths...")
@@ -1864,7 +2096,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     ]
     search_roots = collect_search_roots(common_root, existing_for_roots, top_level_blend_abs.parent if top_level_blend_abs else None)
     recovery_cache: dict = {}
+    recovery_hits = 0
+    recovery_misses = 0
+    recovery_time_s = 0.0
     print(f"[BBP Pack] Stale-path search roots: {len(search_roots)}")
+    for r in search_roots[:24]:
+        _pack_diag(f"  root: {r}", verbose_only=True)
     asset_count = 0
     seen_resolved = set()
     for lib, links_to in asset_usages.items():
@@ -1892,11 +2129,16 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 continue
             src_path = stale_path
             if not src_path.exists():
+                t_rec = time.perf_counter()
                 recovered = recover_stale_path(stale_path, search_roots, recovery_cache)
+                recovery_time_s += time.perf_counter() - t_rec
                 if recovered is None:
+                    recovery_misses += 1
                     print(f"[BBP Pack]   WARNING: Asset does not exist: {stale_path}")
                     missing_on_copy.append(stale_path)
                     continue
+                recovery_hits += 1
+                _pack_diag(f"Recovered: {stale_path.name} -> {recovered}", verbose_only=True)
                 src_path = recovered
             try:
                 src_resolved = src_path.resolve()
@@ -1927,6 +2169,11 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 missing_on_copy.append(stale_path)
     
     print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
+    _pack_diag(
+        f"Stale recovery: hits={recovery_hits} misses={recovery_misses} "
+        f"time={recovery_time_s:.2f}s cache_keys={len(recovery_cache)}"
+    )
+    _diag_copied_udim_tiles(target_path)
     missing_files_report = list(missing_on_copy)
     if missing_on_copy:
         print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in missing_on_copy[:5]]}...")
@@ -2140,11 +2387,11 @@ class BBP_OT_pack_zip(Operator):
         
         # Debug: Log all events (but filter out noisy ones)
         if event.type not in ('TIMER', 'MOUSEMOVE', 'WINDOW_DEACTIVATE'):
-            print(f"[BBP Pack] DEBUG: Modal event received: type={event.type}, value={getattr(event, 'value', 'N/A')}")
+            _pack_debug(f"Modal event received: type={event.type}, value={getattr(event, 'value', 'N/A')}")
         
         # Handle Esc / Cancel button
         if event.type == 'ESC' or pack_settings.cancel_requested:
-            print(f"[BBP Pack] DEBUG: Cancel requested, cancelling")
+            _pack_debug(f"Cancel requested, cancelling")
             self._cleanup(context, cancelled=True)
             self.report({'INFO'}, "Packing cancelled.")
             return {'CANCELLED'}
@@ -2152,33 +2399,33 @@ class BBP_OT_pack_zip(Operator):
         # Handle timer events
         if event.type == 'TIMER':
             try:
-                print(f"[BBP Pack] DEBUG: Modal timer event, current phase: {self._phase}")
+                _pack_debug(f"Modal timer event, current phase: {self._phase}")
                 wm_progress.set_progress(pack_settings.pack_progress)
                 
                 if self._phase == 'INIT':
-                    print(f"[BBP Pack] DEBUG: Entering INIT phase")
+                    _pack_debug(f"Entering INIT phase")
                     pack_settings.pack_progress = 0.0
                     pack_settings.pack_status_message = "Initializing..."
                     self._phase = 'SAVING_BLEND'
-                    print(f"[BBP Pack] DEBUG: Transitioning to SAVING_BLEND phase")
+                    _pack_debug(f"Transitioning to SAVING_BLEND phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_BLEND':
-                    print(f"[BBP Pack] DEBUG: Entering SAVING_BLEND phase")
+                    _pack_debug(f"Entering SAVING_BLEND phase")
                     pack_settings.pack_progress = 5.0
                     pack_settings.pack_status_message = "Saving current blend state..."
                     
                     from .export_ops import save_current_blend_with_frame_range, apply_frame_range_to_blend
                     
-                    print(f"[BBP Pack] DEBUG: About to call save_current_blend_with_frame_range")
+                    _pack_debug(f"About to call save_current_blend_with_frame_range")
                     try:
                         self._temp_blend_path, self._frame_start, self._frame_end, self._frame_step = save_current_blend_with_frame_range(pack_settings)
                         self._temp_dir = self._temp_blend_path.parent
-                        print(f"[BBP Pack] DEBUG: save_current_blend_with_frame_range completed")
+                        _pack_debug(f"save_current_blend_with_frame_range completed")
                         print(f"[BBP Pack] Saved to temp file: {self._temp_blend_path}")
-                        print(f"[BBP Pack] DEBUG: Frame range: {self._frame_start}-{self._frame_end} (step: {self._frame_step})")
+                        _pack_debug(f"Frame range: {self._frame_start}-{self._frame_end} (step: {self._frame_step})")
                     except Exception as e:
-                        print(f"[BBP Pack] DEBUG: ERROR in SAVING_BLEND: {type(e).__name__}: {str(e)}")
+                        _pack_debug(f"ERROR in SAVING_BLEND: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"Failed to save current blend state: {str(e)}"
@@ -2187,25 +2434,25 @@ class BBP_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                     
                     self._phase = 'APPLYING_FRAME_RANGE'
-                    print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE phase")
+                    _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE':
-                    print(f"[BBP Pack] DEBUG: Entering APPLYING_FRAME_RANGE phase")
+                    _pack_debug(f"Entering APPLYING_FRAME_RANGE phase")
                     pack_settings.pack_progress = 10.0
                     pack_settings.pack_status_message = "Frame range applied."
                     # Frame range is already applied in save_current_blend_with_frame_range
                     self._phase = 'OVERRIDING_FILEPATH'
-                    print(f"[BBP Pack] DEBUG: Transitioning to OVERRIDING_FILEPATH phase")
+                    _pack_debug(f"Transitioning to OVERRIDING_FILEPATH phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'OVERRIDING_FILEPATH':
-                    print(f"[BBP Pack] DEBUG: Entering OVERRIDING_FILEPATH phase")
+                    _pack_debug(f"Entering OVERRIDING_FILEPATH phase")
                     pack_settings.pack_progress = 12.0
                     pack_settings.pack_status_message = "Preparing for packing..."
                     
-                    print(f"[BBP Pack] DEBUG: Temp file exists: {self._temp_blend_path.exists() if self._temp_blend_path else 'N/A'}")
-                    print(f"[BBP Pack] DEBUG: Current bpy.data.filepath: {bpy.data.filepath}")
+                    _pack_debug(f"Temp file exists: {self._temp_blend_path.exists() if self._temp_blend_path else 'N/A'}")
+                    _pack_debug(f"Current bpy.data.filepath: {bpy.data.filepath}")
                     
                     # Temporarily override library_abspath to use temp file instead of opening it. This avoids invalidating the operator instance
                     import functools
@@ -2223,7 +2470,7 @@ class BBP_OT_pack_zip(Operator):
                     # Re-apply lru_cache decorator behavior by wrapping
                     au.library_abspath = functools.lru_cache(maxsize=None)(override_library_abspath)
                     
-                    print(f"[BBP Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
+                    _pack_debug(f"Overrode library_abspath to use temp file: {temp_file_path}")
                     
                     # Initialize IncrementalPacker
                     def progress_callback(progress_pct, message):
@@ -2232,7 +2479,7 @@ class BBP_OT_pack_zip(Operator):
                         pack_settings.pack_progress = 15.0 + (progress_pct * 0.46)
                         pack_settings.pack_status_message = message
                         wm_progress.set_progress(pack_settings.pack_progress)
-                        print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
+                        _pack_debug(f"Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2260,7 +2507,7 @@ class BBP_OT_pack_zip(Operator):
                     )
                     
                     self._phase = 'PACKING_INIT'
-                    print(f"[BBP Pack] DEBUG: Transitioning to PACKING_INIT phase")
+                    _pack_debug(f"Transitioning to PACKING_INIT phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'PACKING_INIT' or self._phase.startswith('PACKING_'):
@@ -2272,7 +2519,7 @@ class BBP_OT_pack_zip(Operator):
                         if is_complete:
                             # Packing is complete
                             self._target_path = self._packer.target_path
-                            print(f"[BBP Pack] DEBUG: Incremental packing completed")
+                            _pack_debug(f"Incremental packing completed")
                             print(f"[BBP Pack] Packed to: {self._target_path}")
                             context.scene.bbp_pack.pack_output_path = str(self._target_path)
                             
@@ -2293,20 +2540,20 @@ class BBP_OT_pack_zip(Operator):
                                 self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
                             self._phase = 'APPLYING_FRAME_RANGE_TO_PACKED'
-                            print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
+                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
-                            print(f"[BBP Pack] DEBUG: Packing phase: {self._phase}, continuing...")
+                            _pack_debug(f"Packing phase: {self._phase}, continuing...")
                         
                         return {'RUNNING_MODAL'}
                     except InterruptedError as e:
-                        print(f"[BBP Pack] DEBUG: Packing cancelled by user")
+                        _pack_debug(f"Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
+                        _pack_debug(f"ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {str(e)}"
@@ -2315,7 +2562,7 @@ class BBP_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                 
                 elif self._phase == 'APPLYING_FRAME_RANGE_TO_PACKED':
-                    print(f"[BBP Pack] DEBUG: Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
+                    _pack_debug(f"Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
                     pack_settings.pack_progress = 60.0
                     pack_settings.pack_status_message = "Applying frame range to target blend..."
                     
@@ -2324,20 +2571,20 @@ class BBP_OT_pack_zip(Operator):
                     # Apply frame range only to the target (top-level) blend, not dependent blends
                     target_blend = self._packer.top_level_target_blend if self._packer else None
                     if target_blend and target_blend.exists():
-                        print(f"[BBP Pack] DEBUG: Applying frame range to target blend: {target_blend.name}")
+                        _pack_debug(f"Applying frame range to target blend: {target_blend.name}")
                         apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
                                 area.tag_redraw()
                     else:
-                        print(f"[BBP Pack] DEBUG: No target blend to apply frame range to")
+                        _pack_debug(f"No target blend to apply frame range to")
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
-                    print(f"[BBP Pack] DEBUG: Transitioning to RESTORING_LIBRARY_ABSPATH phase")
+                    _pack_debug(f"Transitioning to RESTORING_LIBRARY_ABSPATH phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'RESTORING_LIBRARY_ABSPATH':
-                    print(f"[BBP Pack] DEBUG: Entering RESTORING_LIBRARY_ABSPATH phase")
+                    _pack_debug(f"Entering RESTORING_LIBRARY_ABSPATH phase")
                     pack_settings.pack_progress = 62.0
                     pack_settings.pack_status_message = "Restoring file paths..."
                     
@@ -2345,14 +2592,14 @@ class BBP_OT_pack_zip(Operator):
                     if hasattr(self, '_original_library_abspath'):
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
-                        print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
+                        _pack_debug(f"Restored original library_abspath function")
                     
                     self._phase = 'VALIDATING_FILE_SIZE'
-                    print(f"[BBP Pack] DEBUG: Transitioning to VALIDATING_FILE_SIZE phase")
+                    _pack_debug(f"Transitioning to VALIDATING_FILE_SIZE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_FILE_SIZE':
-                    print(f"[BBP Pack] DEBUG: Entering VALIDATING_FILE_SIZE phase (before ZIP)")
+                    _pack_debug(f"Entering VALIDATING_FILE_SIZE phase (before ZIP)")
                     pack_settings.pack_progress = 64.0
                     pack_settings.pack_status_message = "Validating file size..."
                     
@@ -2387,11 +2634,11 @@ class BBP_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                     
                     self._phase = 'CREATING_ZIP'
-                    print(f"[BBP Pack] DEBUG: Transitioning to CREATING_ZIP phase")
+                    _pack_debug(f"Transitioning to CREATING_ZIP phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'CREATING_ZIP':
-                    print(f"[BBP Pack] DEBUG: Entering CREATING_ZIP phase")
+                    _pack_debug(f"Entering CREATING_ZIP phase")
                     pack_settings.pack_progress = 65.0
                     pack_settings.pack_status_message = "Creating ZIP archive..."
                     
@@ -2401,8 +2648,8 @@ class BBP_OT_pack_zip(Operator):
                     )
                     
                     self._zip_path = self._target_path.parent / f"{self._target_path.name}.zip"
-                    print(f"[BBP Pack] DEBUG: Creating ZIP: {self._zip_path}")
-                    print(f"[BBP Pack] DEBUG: Source directory: {self._target_path}")
+                    _pack_debug(f"Creating ZIP: {self._zip_path}")
+                    _pack_debug(f"Source directory: {self._target_path}")
                     
                     # Create progress callback for ZIP creation
                     def zip_progress_callback(progress_pct, message):
@@ -2410,7 +2657,7 @@ class BBP_OT_pack_zip(Operator):
                         # Map 0-100% to 65-80% range
                         pack_settings.pack_progress = 65.0 + (progress_pct * 0.15)
                         pack_settings.pack_status_message = message
-                        print(f"[BBP Pack] DEBUG: ZIP progress: {pack_settings.pack_progress:.1f}% - {message}")
+                        _pack_debug(f"ZIP progress: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2470,15 +2717,15 @@ class BBP_OT_pack_zip(Operator):
                         
                         pack_settings.pack_progress = 80.0
                         pack_settings.pack_status_message = "ZIP archive created"
-                        print(f"[BBP Pack] DEBUG: ZIP creation completed")
+                        _pack_debug(f"ZIP creation completed")
                         print(f"[BBP Pack] Creating ZIP: {self._zip_path}")
                     except InterruptedError as e:
-                        print(f"[BBP Pack] DEBUG: ZIP creation cancelled by user")
+                        _pack_debug(f"ZIP creation cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "ZIP creation cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[BBP Pack] DEBUG: ERROR creating ZIP: {type(e).__name__}: {str(e)}")
+                        _pack_debug(f"ERROR creating ZIP: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = f"ZIP creation failed: {str(e)}"
@@ -2487,11 +2734,11 @@ class BBP_OT_pack_zip(Operator):
                         return {'CANCELLED'}
                     
                     self._phase = 'VALIDATING_ZIP_SIZE'
-                    print(f"[BBP Pack] DEBUG: Transitioning to VALIDATING_ZIP_SIZE phase")
+                    _pack_debug(f"Transitioning to VALIDATING_ZIP_SIZE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'VALIDATING_ZIP_SIZE':
-                    print(f"[BBP Pack] DEBUG: Entering VALIDATING_ZIP_SIZE phase")
+                    _pack_debug(f"Entering VALIDATING_ZIP_SIZE phase")
                     pack_settings.pack_progress = 80.5
                     pack_settings.pack_status_message = "Validating ZIP size..."
                     
@@ -2519,7 +2766,7 @@ class BBP_OT_pack_zip(Operator):
                             return {'CANCELLED'}
                     
                     self._phase = 'SAVING_FILE'
-                    print(f"[BBP Pack] DEBUG: Transitioning to SAVING_FILE phase")
+                    _pack_debug(f"Transitioning to SAVING_FILE phase")
                     return {'RUNNING_MODAL'}
                 
                 elif self._phase == 'SAVING_FILE':
@@ -2611,9 +2858,9 @@ class BBP_OT_pack_zip(Operator):
             try:
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
-                print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
+                _pack_debug(f"Restored original library_abspath in cleanup")
             except Exception as e:
-                print(f"[BBP Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
+                _pack_debug(f"WARNING: Could not restore library_abspath: {e}")
         
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
@@ -2785,7 +3032,7 @@ class BBP_OT_pack_blend(Operator):
                     # Re-apply lru_cache decorator behavior by wrapping
                     au.library_abspath = functools.lru_cache(maxsize=None)(override_library_abspath)
                     
-                    print(f"[BBP Pack] DEBUG: Overrode library_abspath to use temp file: {temp_file_path}")
+                    _pack_debug(f"Overrode library_abspath to use temp file: {temp_file_path}")
                     
                     # Initialize IncrementalPacker
                     def progress_callback(progress_pct, message):
@@ -2794,7 +3041,7 @@ class BBP_OT_pack_blend(Operator):
                         pack_settings.pack_progress = 15.0 + (progress_pct * 0.55)
                         pack_settings.pack_status_message = message
                         wm_progress.set_progress(pack_settings.pack_progress)
-                        print(f"[BBP Pack] DEBUG: Progress update: {pack_settings.pack_progress:.1f}% - {message}")
+                        _pack_debug(f"Progress update: {pack_settings.pack_progress:.1f}% - {message}")
                         # Force UI redraw on every update
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
@@ -2834,7 +3081,7 @@ class BBP_OT_pack_blend(Operator):
                             # Packing is complete
                             self._target_path = self._packer.target_path
                             self._blend_path = self._packer.file_path
-                            print(f"[BBP Pack] DEBUG: Incremental packing completed")
+                            _pack_debug(f"Incremental packing completed")
                             print(f"[BBP Pack] Packed to: {self._target_path}")
                             context.scene.bbp_pack.pack_output_path = str(self._target_path)
                             
@@ -2861,20 +3108,20 @@ class BBP_OT_pack_blend(Operator):
                                 return {'CANCELLED'}
                             
                             self._phase = 'APPLYING_FRAME_RANGE_TO_TARGET'
-                            print(f"[BBP Pack] DEBUG: Transitioning to APPLYING_FRAME_RANGE_TO_TARGET phase")
+                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_TARGET phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
-                            print(f"[BBP Pack] DEBUG: Packing phase: {self._phase}, continuing...")
+                            _pack_debug(f"Packing phase: {self._phase}, continuing...")
                         
                         return {'RUNNING_MODAL'}
                     except InterruptedError as e:
-                        print(f"[BBP Pack] DEBUG: Packing cancelled by user")
+                        _pack_debug(f"Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
                         self.report({'INFO'}, "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
-                        print(f"[BBP Pack] DEBUG: ERROR in PACKING: {type(e).__name__}: {str(e)}")
+                        _pack_debug(f"ERROR in PACKING: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
                         self._error = str(e) if isinstance(e, DeadUncAssetError) else f"Packing failed: {str(e)}"
@@ -2903,7 +3150,7 @@ class BBP_OT_pack_blend(Operator):
                     if hasattr(self, '_original_library_abspath'):
                         au.library_abspath.cache_clear()
                         au.library_abspath = self._original_library_abspath
-                        print(f"[BBP Pack] DEBUG: Restored original library_abspath function")
+                        _pack_debug(f"Restored original library_abspath function")
                     
                     self._phase = 'VALIDATING_FILE_SIZE'
                     return {'RUNNING_MODAL'}
@@ -3022,9 +3269,9 @@ class BBP_OT_pack_blend(Operator):
             try:
                 au.library_abspath.cache_clear()
                 au.library_abspath = self._original_library_abspath
-                print(f"[BBP Pack] DEBUG: Restored original library_abspath in cleanup")
+                _pack_debug(f"Restored original library_abspath in cleanup")
             except Exception as e:
-                print(f"[BBP Pack] DEBUG: WARNING: Could not restore library_abspath: {e}")
+                _pack_debug(f"WARNING: Could not restore library_abspath: {e}")
         
         # Remove timer
         if hasattr(self, '_timer') and self._timer:
