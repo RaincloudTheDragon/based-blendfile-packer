@@ -167,10 +167,226 @@ def compute_target_relpath(abs_path: Path, base_root: Path) -> Path:
 
 def _norm_copy_map_key(path) -> str:
     """Normalize path for copy_map key; must match remap script norm_key."""
-    s = str(Path(path).resolve())
+    try:
+        s = str(Path(path).resolve())
+    except OSError:
+        s = os.path.normpath(str(path))
     if os.name == "nt":
         return s.lower().replace("\\", "/")
     return s
+
+
+def _copy_map_register(copy_map: dict, stale_path: Path, resolved_src: Path, dest: Path) -> None:
+    """Map both the stale stored path and the live source path to the packed destination."""
+    dest_s = str(Path(dest).resolve())
+    copy_map[_norm_copy_map_key(resolved_src)] = dest_s
+    if Path(stale_path) != Path(resolved_src):
+        copy_map[_norm_copy_map_key(stale_path)] = dest_s
+
+
+# Bound stale-path walks so remap/copy cannot hang on huge studio trees (remap 300s timeout).
+_RECOVERY_MAX_UP = 6
+_RECOVERY_MAX_DEPTH = 5
+_RECOVERY_MAX_DIRS = 800
+_RECOVERY_MAX_HITS = 12
+
+
+def collect_search_roots(common_root: Optional[Path], existing_paths: list, blend_parent: Optional[Path] = None) -> list[Path]:
+    """Build session-derived roots for stale-path recovery (no studio-hardcoded aliases).
+
+    Uses ancestors of live assets (capped) instead of a drive-wide commonpath — unbounded common roots made rglob hang until remap timed out.
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Optional[Path]) -> None:
+        if p is None:
+            return
+        try:
+            rp = Path(p)
+            if not rp.exists():
+                return
+            root = rp if rp.is_dir() else rp.parent
+            # Skip drive / UNC share roots (too large to walk).
+            if root == root.parent or (len(root.parts) <= 1):
+                return
+            if os.name == "nt" and len(root.parts) <= 2 and str(root).startswith("\\\\"):
+                return
+            key = _norm_copy_map_key(root)
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append(root)
+        except OSError:
+            return
+
+    _add(common_root)
+    _add(blend_parent)
+    for p in existing_paths:
+        try:
+            cur = Path(p).resolve()
+            if not cur.exists():
+                continue
+            cur = cur.parent
+            for _ in range(_RECOVERY_MAX_UP):
+                _add(cur)
+                parent = cur.parent
+                if parent == cur:
+                    break
+                cur = parent
+        except OSError:
+            continue
+    return roots
+
+
+def _path_suffix_score(stale: Path, hit: Path) -> int:
+    """Count matching trailing path parts (case-insensitive)."""
+    sp = [x.lower() for x in Path(stale).parts]
+    hp = [x.lower() for x in Path(hit).parts]
+    score = 0
+    for a, b in zip(reversed(sp), reversed(hp)):
+        if a != b:
+            break
+        score += 1
+    return score
+
+
+def _resolve_blender_datafiles_asset(stale: Path) -> Optional[Path]:
+    """Map stale Blender-install datafiles paths to the running Blender's DATAFILES tree."""
+    name = stale.name
+    if name != "geometry_nodes_essentials.blend":
+        return None
+    if "datafiles" not in str(stale).replace("\\", "/").lower():
+        return None
+    try:
+        df = Path(bpy.utils.system_resource("DATAFILES"))
+        cand = df / "assets" / "nodes" / name
+        if cand.is_file():
+            return cand.resolve()
+    except Exception:
+        pass
+    return None
+
+
+def _suffix_graft_hits(stale: Path, search_roots: list[Path]) -> list[Path]:
+    """Try root / trailing-suffix candidates (no directory walk)."""
+    parts = Path(stale).parts
+    if not parts:
+        return []
+    hits: list[Path] = []
+    seen: set[str] = set()
+    # Longest suffix first (skip empty / single-drive prefixes).
+    for i in range(len(parts)):
+        suffix_parts = parts[i:]
+        if not suffix_parts:
+            continue
+        # Need at least basename; prefer basename+parent when possible.
+        for root in search_roots:
+            try:
+                cand = root.joinpath(*suffix_parts)
+                if cand.is_file():
+                    key = _norm_copy_map_key(cand)
+                    if key not in seen:
+                        seen.add(key)
+                        hits.append(cand.resolve())
+            except OSError:
+                continue
+    return hits
+
+
+def _bounded_basename_hits(name: str, search_roots: list[Path]) -> list[Path]:
+    """Find basename under search roots with hard caps (avoids remap timeout)."""
+    hits: list[Path] = []
+    seen: set[str] = set()
+    for root in search_roots:
+        try:
+            if not root.is_dir():
+                continue
+            root_depth = len(root.parts)
+            dirs_seen = 0
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirs_seen += 1
+                if dirs_seen > _RECOVERY_MAX_DIRS:
+                    dirnames.clear()
+                    break
+                depth = len(Path(dirpath).parts) - root_depth
+                if depth >= _RECOVERY_MAX_DEPTH:
+                    dirnames.clear()
+                    continue
+                if name in filenames:
+                    hit = Path(dirpath) / name
+                    try:
+                        if hit.is_file():
+                            key = _norm_copy_map_key(hit)
+                            if key not in seen:
+                                seen.add(key)
+                                hits.append(hit.resolve())
+                                if len(hits) >= _RECOVERY_MAX_HITS:
+                                    return hits
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return hits
+
+
+def recover_stale_path(
+    stale: Path,
+    search_roots: list[Path],
+    cache: Optional[dict] = None,
+) -> Optional[Path]:
+    """Resolve a dead stored filepath to a live twin under session search roots.
+
+    Prefers suffix graft, then longest shared trailing suffix among bounded basename hits; otherwise a unique basename hit.
+    """
+    try:
+        stale_p = Path(stale)
+        if stale_p.is_file():
+            return stale_p.resolve()
+    except OSError:
+        stale_p = Path(stale)
+
+    df_hit = _resolve_blender_datafiles_asset(stale_p)
+    if df_hit is not None:
+        print(f"[BBP Pack]   Recovered stale path: {stale_p} -> {df_hit}")
+        return df_hit
+
+    name = stale_p.name
+    if not name or not search_roots:
+        return None
+
+    # Instant: graft trailing suffixes onto roots (handles same relative layout).
+    grafted = _suffix_graft_hits(stale_p, search_roots)
+    if len(grafted) == 1:
+        print(f"[BBP Pack]   Recovered stale path: {stale_p} -> {grafted[0]}")
+        return grafted[0]
+    if grafted:
+        scored_g = sorted(((_path_suffix_score(stale_p, h), h) for h in grafted), key=lambda t: (-t[0], str(t[1]).lower()))
+        if scored_g[0][0] >= 2:
+            tied = [h for s, h in scored_g if s == scored_g[0][0]]
+            if len(tied) == 1:
+                print(f"[BBP Pack]   Recovered stale path: {stale_p} -> {tied[0]}")
+                return tied[0]
+
+    cache = cache if cache is not None else {}
+    if name not in cache:
+        cache[name] = _bounded_basename_hits(name, search_roots)
+    hits = cache[name]
+    if not hits:
+        return None
+
+    scored = sorted(((_path_suffix_score(stale_p, h), h) for h in hits), key=lambda t: (-t[0], str(t[1]).lower()))
+    best_score, best = scored[0]
+    # Prefer a clear suffix match (basename + at least one parent), unique at that score.
+    if best_score >= 2:
+        tied = [h for s, h in scored if s == best_score]
+        if len(tied) == 1:
+            print(f"[BBP Pack]   Recovered stale path: {stale_p} -> {best}")
+            return best
+    if len(hits) == 1:
+        print(f"[BBP Pack]   Recovered stale path: {stale_p} -> {hits[0]}")
+        return hits[0]
+    return None
 
 
 def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list, 
@@ -464,17 +680,26 @@ def truncate_caches_to_frame_range(cache_dir: Path, frame_start: int, frame_end:
     return files_removed
 
 
+def _log_blender_subprocess_output(stdout: str, stderr: str) -> None:
+    """Print a short preview of Blender subprocess stdout/stderr."""
+    if stdout:
+        stdout_lines = stdout.strip().split("\n")
+        print(f"[BBP Pack]   stdout ({len(stdout_lines)} lines):")
+        for line in stdout_lines[:10]:
+            print(f"[BBP Pack]     {line}")
+        if len(stdout_lines) > 10:
+            print(f"[BBP Pack]     ... ({len(stdout_lines) - 10} more lines)")
+    if stderr:
+        stderr_lines = stderr.strip().split("\n")
+        print(f"[BBP Pack]   stderr ({len(stderr_lines)} lines):")
+        for line in stderr_lines[:10]:
+            print(f"[BBP Pack]     {line}")
+        if len(stderr_lines) > 10:
+            print(f"[BBP Pack]     ... ({len(stderr_lines) - 10} more lines)")
+
+
 def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tuple[str, str, int]:
-    """Run a Python script in a Blender subprocess.
-
-    Args:
-        script: Python script to execute
-        blend_path: Path to blend file to process
-        timeout: Timeout in seconds (default 300 = 5 minutes)
-
-    Returns:
-        Tuple of (stdout, stderr, returncode)
-    """
+    """Run an inline Python expression in a Blender subprocess (--python-expr)."""
     import subprocess
     import time
     print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
@@ -482,25 +707,16 @@ def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tu
     print(f"[BBP Pack]   Timeout: {timeout}s")
     start_time = time.time()
     try:
-        result = subprocess.run([
-            "blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script
-        ], capture_output=True, text=True, check=False, timeout=timeout)
+        result = subprocess.run(
+            ["blender", "--factory-startup", "-b", str(blend_path), "--python-expr", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
         elapsed = time.time() - start_time
         print(f"[BBP Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
-        if result.stdout:
-            stdout_lines = result.stdout.strip().split('\n')
-            print(f"[BBP Pack]   stdout ({len(stdout_lines)} lines):")
-            for line in stdout_lines[:10]:  # First 10 lines
-                print(f"[BBP Pack]     {line}")
-            if len(stdout_lines) > 10:
-                print(f"[BBP Pack]     ... ({len(stdout_lines) - 10} more lines)")
-        if result.stderr:
-            stderr_lines = result.stderr.strip().split('\n')
-            print(f"[BBP Pack]   stderr ({len(stderr_lines)} lines):")
-            for line in stderr_lines[:10]:  # First 10 lines
-                print(f"[BBP Pack]     {line}")
-            if len(stderr_lines) > 10:
-                print(f"[BBP Pack]     ... ({len(stderr_lines) - 10} more lines)")
+        _log_blender_subprocess_output(result.stdout or "", result.stderr or "")
         return result.stdout, result.stderr, result.returncode
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start_time
@@ -513,262 +729,94 @@ def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tu
         return "", str(e), -1
 
 
-def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root: Path, target_path: Path, ensure_autopack: bool = True) -> list[Path]:
-    """Open a blend file and remap all library paths to be relative to the copied tree."""
-    import json
-    import tempfile
-    
-    # Write copy_map to a temporary JSON file to avoid Windows command line length limits
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
-        json.dump(copy_map, f, indent=None)
-        copy_map_file = Path(f.name)
-    
+def _run_blender_python_file(
+    script_path: Path,
+    blend_path: Path,
+    config_path: Optional[Path] = None,
+    timeout: int = 300,
+) -> tuple[str, str, int]:
+    """Run a .py file in a Blender subprocess: blender -b <blend> --python <script> [-- <config>]."""
+    import subprocess
+    import time
+    print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
+    print(f"[BBP Pack]   Full path: {blend_path}")
+    print(f"[BBP Pack]   Script file: {script_path.name}")
+    print(f"[BBP Pack]   Timeout: {timeout}s")
+    start_time = time.time()
+    cmd = [
+        "blender",
+        "--factory-startup",
+        "-b",
+        str(blend_path),
+        "--python",
+        str(script_path),
+    ]
+    if config_path is not None:
+        cmd.extend(["--", str(config_path)])
     try:
-        autopack_block = ""
-        if ensure_autopack:
-            autopack_block = (
-                "try:\n"
-                "    fp = bpy.context.preferences.filepaths\n"
-                "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
-                "        if hasattr(fp, k):\n"
-                "            try:\n"
-                "                setattr(fp, k, True)\n"
-                "            except Exception:\n"
-                "                pass\n"
-                "except Exception:\n"
-                "    pass\n"
-            )
-        
-        # Escape backslashes in paths for the script
-        copy_map_file_str = str(copy_map_file).replace('\\', '\\\\')
-        common_root_str = str(common_root).replace('\\', '\\\\')
-        target_path_str = str(target_path).replace('\\', '\\\\')
-        
-        remap_script = (
-            "import bpy, json, sys, os\n"
-            "from pathlib import Path\n"
-            f"copy_map_file = Path(r'{copy_map_file_str}')\n"
-            f"with open(copy_map_file, 'r', encoding='utf-8') as f:\n"
-            f"    copy_map = json.load(f)\n"
-            f"common_root = Path(r'{common_root_str}')\n"
-            f"target_path = Path(r'{target_path_str}')\n"
-            "blend_dir = Path(bpy.data.filepath).parent\n"
-        "bpy.context.preferences.filepaths.use_relative_paths = True\n"
-        "def abort_dead_unc(path, kind='', name='', err=''):\n"
-        "    print('BBP_FATAL_DEAD_UNC:' + str(path))\n"
-        "    print('BBP_FATAL_DEAD_UNC_KIND:' + str(kind))\n"
-        "    print('BBP_FATAL_DEAD_UNC_NAME:' + str(name))\n"
-        "    print('BBP_FATAL_DEAD_UNC_ERR:' + str(err))\n"
-        "    print('Pack aborted: inaccessible network path (dead UNC):', path)\n"
-        "    sys.exit(2)\n"
-        "def safe_resolve(p, kind='', name=''):\n"
-        "    try:\n"
-        "        return Path(p).resolve()\n"
-        "    except OSError as e:\n"
-        "        abort_dead_unc(p, kind, name, e)\n"
-        "def norm_key(p):\n"
-        "    s = str(safe_resolve(p))\n"
-        "    if os.name == 'nt':\n"
-        "        return s.lower().replace(chr(92), '/')\n"
-        "    return s\n"
-        "copy_map_norm = {norm_key(k): v for k, v in copy_map.items()}\n"
-        "remapped = 0\n"
-        "unresolved = []\n"
-        "print('Remapping library paths in:', bpy.path.basename(bpy.data.filepath))\n"
-        "print('Found', len(bpy.data.libraries), 'libraries')\n"
-        "for lib in bpy.data.libraries:\n"
-        "    if getattr(lib, 'packed_file', None):\n"
-        "        print('  Skipping packed library:', lib.name)\n"
-        "        continue\n"
-        "    src = lib.filepath\n"
-        "    print('  Processing library:', lib.name, ', current path:', src)\n"
-        "    if src.startswith('//'):\n"
-        "        abs_src = safe_resolve(blend_dir / src[2:], 'Library', lib.name)\n"
-        "    else:\n"
-        "        abs_src = safe_resolve(src, 'Library', lib.name)\n"
-        "    key = norm_key(abs_src)\n"
-        "    new_abs = None\n"
-        "    try:\n"
-        "        if abs_src.relative_to(target_path):\n"
-        "            new_abs = abs_src\n"
-        "            print('    Already in target path:', new_abs)\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    if new_abs is None and key in copy_map_norm:\n"
-        "        new_abs = Path(copy_map_norm[key])\n"
-        "        print('    Found in copy_map:', new_abs)\n"
-        "    if new_abs is None:\n"
-        "        for cm_k, cm_v in copy_map_norm.items():\n"
-        "            if safe_resolve(cm_v) == abs_src:\n"
-        "                new_abs = abs_src\n"
-        "                break\n"
-        "    if new_abs is None:\n"
-        "        try:\n"
-        "            rel_to_root = abs_src.relative_to(common_root)\n"
-        "            new_abs = safe_resolve(target_path / rel_to_root)\n"
-        "            print('    Computed from common_root:', new_abs)\n"
-        "        except Exception:\n"
-        "            pass\n"
-        "    if new_abs is not None:\n"
-        "        if new_abs.exists():\n"
-        "            lib.filepath = str(new_abs)\n"
-        "            try:\n"
-        "                rel_path = bpy.path.relpath(str(new_abs))\n"
-        "                lib.filepath = rel_path\n"
-        "                print('    Remapped to relative:', rel_path)\n"
-        "                remapped += 1\n"
-        "            except Exception as e:\n"
-        "                print('    WARNING: Could not make relative:', e, ', keeping absolute')\n"
-        "                remapped += 1\n"
-        "        else:\n"
-        "            print('    WARNING: Target file does not exist:', new_abs)\n"
-        "            unresolved.append(str(new_abs))\n"
-        "    else:\n"
-        "        print('    WARNING: Could not determine new path for:', abs_src)\n"
-        "        unresolved.append(str(abs_src))\n"
-        "print('Remapped', remapped, 'libraries,', len(unresolved), 'unresolved')\n"
-        "if unresolved:\n"
-        "    print('Unresolved paths:', unresolved)\n"
-        "# Remap image/texture paths\n"
-        "images_remapped = 0\n"
-        "for img in bpy.data.images:\n"
-        "    if getattr(img, 'packed_file', None):\n"
-        "        continue  # packed data is self-contained; ignore dead filepath\n"
-        "    if img.filepath and img.filepath not in ('', '<builtin>', '<memory>'):\n"
-        "        src = img.filepath\n"
-        "        if src.startswith('//'):\n"
-        "            abs_src = safe_resolve(blend_dir / src[2:], 'Image', img.name)\n"
-        "        else:\n"
-        "            abs_src = safe_resolve(src, 'Image', img.name)\n"
-        "        key = norm_key(abs_src)\n"
-        "        new_abs = None\n"
-        "        try:\n"
-        "            if abs_src.relative_to(target_path):\n"
-        "                new_abs = abs_src\n"
-        "        except Exception:\n"
-        "            pass\n"
-        "        if new_abs is None and key in copy_map_norm:\n"
-        "            new_abs = Path(copy_map_norm[key])\n"
-        "        if new_abs is None:\n"
-        "            for cm_k, cm_v in copy_map_norm.items():\n"
-        "                if safe_resolve(cm_v) == abs_src:\n"
-        "                    new_abs = abs_src\n"
-        "                    break\n"
-        "        if new_abs is None:\n"
-        "            try:\n"
-        "                rel_to_root = abs_src.relative_to(common_root)\n"
-        "                new_abs = safe_resolve(target_path / rel_to_root)\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "        if new_abs is not None and new_abs.exists():\n"
-        "            img.filepath = str(new_abs)\n"
-        "            try:\n"
-        "                rel_path = bpy.path.relpath(str(new_abs))\n"
-        "                img.filepath = rel_path\n"
-        "                images_remapped += 1\n"
-        "            except Exception:\n"
-        "                images_remapped += 1\n"
-        "print('Remapped', images_remapped, 'image/texture paths')\n"
-        "# Remap physics/point cache paths (particle systems, cloth, soft body, etc.)\n"
-        "caches_remapped = 0\n"
-        "def remap_abs_to_rel(abs_src):\n"
-        "    key = norm_key(abs_src)\n"
-        "    new_abs = None\n"
-        "    try:\n"
-        "        if abs_src.relative_to(target_path):\n"
-        "            new_abs = abs_src\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    if new_abs is None and key in copy_map_norm:\n"
-        "        new_abs = Path(copy_map_norm[key])\n"
-        "    if new_abs is None:\n"
-        "        for cm_k, cm_v in copy_map_norm.items():\n"
-        "            if safe_resolve(cm_v) == abs_src:\n"
-        "                new_abs = abs_src\n"
-        "                break\n"
-        "    if new_abs is None:\n"
-        "        for src_prefix in sorted(copy_map_norm.keys(), key=lambda x: -len(x)):\n"
-        "            try:\n"
-        "                rel = abs_src.relative_to(Path(src_prefix))\n"
-        "                candidate = safe_resolve(Path(copy_map_norm[src_prefix]) / rel)\n"
-        "                if candidate.exists():\n"
-        "                    new_abs = candidate\n"
-        "                    break\n"
-        "            except (ValueError, KeyError):\n"
-        "                pass\n"
-        "    if new_abs is None:\n"
-        "        try:\n"
-        "            rel_to_root = abs_src.relative_to(common_root)\n"
-        "            new_abs = safe_resolve(target_path / rel_to_root)\n"
-        "        except Exception:\n"
-        "            pass\n"
-        "    if new_abs is not None and new_abs.exists():\n"
-        "        try:\n"
-        "            rel_path = bpy.path.relpath(str(new_abs))\n"
-        "            return rel_path\n"
-        "        except Exception:\n"
-        "            return str(new_abs)\n"
-        "    return None\n"
-        "def do_remap_path(src, kind='Cache', name=''):\n"
-        "    if not src or src in ('', '<builtin>', '<memory>'):\n"
-        "        return None\n"
-        "    if src.startswith('//'):\n"
-        "        abs_src = safe_resolve(blend_dir / src[2:], kind, name)\n"
-        "    else:\n"
-        "        abs_src = safe_resolve(src, kind, name)\n"
-        "    new_path = remap_abs_to_rel(abs_src)\n"
-        "    if new_path is not None:\n"
-        "        return new_path\n"
-        "    return None\n"
-        "for obj in bpy.data.objects:\n"
-        "    for mod in getattr(obj, 'modifiers', []):\n"
-        "        ps = getattr(mod, 'particle_system', None)\n"
-        "        if ps and getattr(ps, 'point_cache', None):\n"
-        "            pc = ps.point_cache\n"
-        "            if getattr(pc, 'filepath', None):\n"
-        "                new_path = do_remap_path(pc.filepath, 'PointCache', obj.name)\n"
-        "                if new_path is not None:\n"
-        "                    pc.filepath = new_path\n"
-        "                    caches_remapped += 1\n"
-        "        pc = getattr(mod, 'point_cache', None)\n"
-        "        if pc and getattr(pc, 'filepath', None):\n"
-        "            new_path = do_remap_path(pc.filepath, 'PointCache', obj.name)\n"
-        "            if new_path is not None:\n"
-        "                pc.filepath = new_path\n"
-        "                caches_remapped += 1\n"
-        "print('Remapped', caches_remapped, 'physics/point cache paths')\n"
-        "# Remap cache file paths (USD, etc.)\n"
-        "cache_files_remapped = 0\n"
-        "for cf in getattr(bpy.data, 'cache_files', []):\n"
-        "    if getattr(cf, 'filepath', None):\n"
-        "        new_path = do_remap_path(cf.filepath, 'CacheFile', getattr(cf, 'name', ''))\n"
-        "        if new_path is not None:\n"
-        "            cf.filepath = new_path\n"
-        "            cache_files_remapped += 1\n"
-        "print('Remapped', cache_files_remapped, 'cache file (USD) paths')\n"
-        "# Save after remapping\n"
-        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
-        "# Make all paths relative\n"
-        "try:\n"
-        "    bpy.ops.file.make_paths_relative(basedir=str(blend_dir))\n"
-        "    print('Made all paths relative')\n"
-        "except Exception as e:\n"
-        "    print('Warning: make_paths_relative failed:', e)\n"
-        f"{autopack_block}"
-        "# Final save\n"
-        "bpy.ops.wm.save_as_mainfile(filepath=str(Path(bpy.data.filepath)), compress=True)\n"
-        "print('Remapping complete')\n"
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
         )
-        
-        stdout, stderr, returncode = _run_blender_script(remap_script, blend_path)
+        elapsed = time.time() - start_time
+        print(f"[BBP Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
+        _log_blender_subprocess_output(result.stdout or "", result.stderr or "")
+        return result.stdout, result.stderr, result.returncode
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start_time
+        print(f"[BBP Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s)")
+        print(f"[BBP Pack]   This may indicate the blend file has issues or is very large")
+        return "", f"Script timed out after {timeout} seconds", -1
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[BBP Pack]   ERROR: Script failed after {elapsed:.2f}s: {type(e).__name__}: {str(e)}")
+        return "", str(e), -1
+
+
+def remap_library_paths(
+    blend_path: Path,
+    copy_map: dict[str, str],
+    common_root: Path,
+    target_path: Path,
+    ensure_autopack: bool = True,
+    search_roots: Optional[list] = None,
+) -> list[Path]:
+    """Open a blend file and remap all library paths to be relative to the copied tree.
+
+    Logic lives in ops/remap_blend.py (readable Blender --python entrypoint).
+    """
+    import json
+    import re
+    import tempfile
+
+    remap_script_path = Path(__file__).resolve().parent / "remap_blend.py"
+    payload = {
+        "copy_map": copy_map,
+        "search_roots": [str(p) for p in (search_roots or [])],
+        "common_root": str(common_root),
+        "target_path": str(target_path),
+        "ensure_autopack": bool(ensure_autopack),
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(payload, f, indent=None)
+        config_path = Path(f.name)
+
+    stdout = stderr = ""
+    returncode = -1
+    try:
+        stdout, stderr, returncode = _run_blender_python_file(
+            remap_script_path, blend_path, config_path, timeout=300
+        )
     finally:
-        # Clean up temp file
         try:
-            if copy_map_file.exists():
-                copy_map_file.unlink()
+            if config_path.exists():
+                config_path.unlink()
         except Exception:
             pass
-    
+
     # Dead UNC / inaccessible network path: abort packing (do not claim success)
     dead = _extract_dead_unc_from_output(stdout or "", stderr or "")
     if dead or returncode == 2:
@@ -779,97 +827,47 @@ def remap_library_paths(blend_path: Path, copy_map: dict[str, str], common_root:
         err = DeadUncAssetError(path, kind, name or blend_path.name, detail)
         print(f"[BBP Pack] ERROR: {err}")
         raise err
-    
+
     unresolved = []
-    
-    # Parse unresolved paths from output
     if stdout:
-        import re
         for line in stdout.splitlines():
-            if 'Unresolved paths:' in line or 'WARNING: Target file does not exist:' in line or 'WARNING: Could not determine new path for:' in line:
-                # Try to extract path from the line
-                match = re.search(r':\s*(.+)$', line)
+            if (
+                "Unresolved paths:" in line
+                or "WARNING: Target file does not exist:" in line
+                or "WARNING: Could not determine new path for:" in line
+            ):
+                match = re.search(r":\s*(.+)$", line)
                 if match:
                     unresolved_path = match.group(1).strip()
                     try:
                         unresolved.append(Path(unresolved_path))
                     except Exception:
                         pass
-    
+
     if returncode != 0:
         print(f"[BBP Pack] WARNING: remap_library_paths returned non-zero exit code: {returncode}")
         if stderr:
             print(f"[BBP Pack]   Error details: {stderr[:500]}")
-    
+
     if unresolved:
         print(f"[BBP Pack] WARNING: {len(unresolved)} library paths could not be remapped")
-        for up in unresolved[:5]:  # Show first 5
+        for up in unresolved[:5]:
             print(f"[BBP Pack]   - {up}")
         if len(unresolved) > 5:
             print(f"[BBP Pack]   ... and {len(unresolved) - 5} more")
-    
+
     return unresolved
 
 
 def pack_all_in_blend(blend_path: Path) -> list[Path]:
-    """Open a blend and pack all external files into it so headless render has no missing images."""
-    script = (
-        "import bpy\n"
-        "from pathlib import Path\n"
-        "blend_dir = Path(bpy.data.filepath).parent\n"
-        "fp = getattr(bpy.context.preferences, 'filepaths', None)\n"
-        "if fp:\n"
-        "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
-        "        if hasattr(fp, k):\n"
-        "            try:\n"
-        "                setattr(fp, k, True)\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "try:\n"
-        "    bpy.ops.file.make_paths_relative(basedir=str(blend_dir))\n"
-        "except Exception:\n"
-        "    pass\n"
-        "try:\n"
-        "    bpy.ops.file.pack_all()\n"
-        "except Exception as e:\n"
-        "    print('Pack all (operator) failed:', e)\n"
-        "for img in list(bpy.data.images):\n"
-        "    if not getattr(img, 'filepath', None) or img.filepath in ('', '<builtin>', '<memory>'):\n"
-        "        continue\n"
-        "    try:\n"
-        "        _ = img.size[0]\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "try:\n"
-        "    bpy.ops.file.pack_all()\n"
-        "except Exception as e:\n"
-        "    print('Pack all (second pass) failed:', e)\n"
-        "n = 0\n"
-        "for img in list(bpy.data.images):\n"
-        "    if not getattr(img, 'filepath', None) or img.filepath in ('', '<builtin>', '<memory>'):\n"
-        "        continue\n"
-        "    if getattr(img, 'source', 'FILE') not in ('FILE', 'TILED'):\n"
-        "        continue\n"
-        "    if getattr(img, 'packed_file', None) and getattr(img.packed_file, 'size', 0) > 0:\n"
-        "        continue\n"
-        "    try:\n"
-        "        if hasattr(img, 'pack'):\n"
-        "            img.pack()\n"
-        "            n += 1\n"
-        "    except Exception as e:\n"
-        "        print('Pack image failed:', img.name, e)\n"
-        "if n:\n"
-        "    print('Packed', n, 'images explicitly')\n"
-        "try:\n"
-        "    bpy.ops.wm.save_mainfile(compress=True)\n"
-        "except Exception as e:\n"
-        "    print('Save failed:', e)\n"
-    )
-    
-    stdout, stderr, returncode = _run_blender_script(script, blend_path)
-    missing = []
-    # Parse missing files from output if needed
-    return missing
+    """Open a blend and pack all external files into it so headless render has no missing images.
+
+    Logic lives in ops/pack_all_blend.py (readable Blender --python entrypoint).
+    """
+    script_path = Path(__file__).resolve().parent / "pack_all_blend.py"
+    _run_blender_python_file(script_path, blend_path, config_path=None, timeout=300)
+    # Parse missing files from output if needed (currently unused by callers).
+    return []
 
 
 def _get_project_size_limit_bytes(context=None):
@@ -1199,6 +1197,9 @@ class IncrementalPacker:
         self.assets_copied = 0
         self.top_level_target_blend = None
         self.cache_dirs = []  # List of cache directories to truncate
+        # Stale-path recovery: session-derived roots + basename→hits cache
+        self.search_roots: list[Path] = []
+        self._recovery_cache: dict = {}
         
         # Blend processing state
         self.blend_deps = None
@@ -1391,6 +1392,17 @@ class IncrementalPacker:
                     self.assets_to_copy.append((asset_usage, asset_relpath))
             
             self.assets_copied = 0
+            # Build search roots from live BAT paths so stale absolutes can be recovered later.
+            existing_for_roots = [
+                a.abspath
+                for links in self.asset_usages.values()
+                for a in links
+                if a.abspath.exists()
+            ]
+            blend_parent = self.top_level_blend_abs.parent if self.top_level_blend_abs else None
+            self.search_roots = collect_search_roots(self.common_root, existing_for_roots, blend_parent)
+            self._recovery_cache = {}
+            print(f"[BBP Pack] Stale-path search roots: {len(self.search_roots)}")
             self.phase = 'COPY_ASSETS'
             return ('COPY_ASSETS', False)
         
@@ -1401,32 +1413,55 @@ class IncrementalPacker:
             
             for i in range(self.assets_copied, batch_end):
                 asset_usage, asset_relpath = self.assets_to_copy[i]
-                resolved = asset_usage.abspath.resolve()
-                if resolved in self.copied_paths:
+                stale_path = asset_usage.abspath
+                try:
+                    stale_resolved = stale_path.resolve()
+                except OSError:
+                    stale_resolved = Path(stale_path)
+                if stale_resolved in self.copied_paths:
                     continue
                 # Skip video/audio entirely when exclude is enabled (ZIP + missing abort)
-                if _is_excluded_media_path(asset_usage.abspath, self.exclude_av):
-                    print(f"[BBP Pack]   Skipping excluded media: {asset_usage.abspath.name}")
+                if _is_excluded_media_path(stale_path, self.exclude_av):
+                    print(f"[BBP Pack]   Skipping excluded media: {stale_path.name}")
                     continue
-                if not asset_usage.abspath.exists():
-                    print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
-                    self.missing_on_copy.append(asset_usage.abspath)
+                src_path = stale_path
+                if not src_path.exists():
+                    recovered = recover_stale_path(stale_path, self.search_roots, self._recovery_cache)
+                    if recovered is None:
+                        print(f"[BBP Pack]   WARNING: Asset does not exist: {stale_path}")
+                        self.missing_on_copy.append(stale_path)
+                        continue
+                    src_path = recovered
+                try:
+                    src_resolved = src_path.resolve()
+                except OSError:
+                    src_resolved = Path(src_path)
+                if src_resolved in self.copied_paths:
+                    # Live file already packed; only rebind the stale key for remap.
+                    dest = self.copy_map.get(_norm_copy_map_key(src_resolved))
+                    if dest:
+                        self.copy_map[_norm_copy_map_key(stale_path)] = dest
+                    self.copied_paths.add(stale_resolved)
                     continue
+                try:
+                    asset_relpath = src_resolved.relative_to(self.common_root)
+                except ValueError:
+                    asset_relpath = compute_target_relpath(src_resolved, self.common_root)
                 
                 target_asset_path = self.target_path / asset_relpath
                 try:
                     target_asset_path.parent.mkdir(parents=True, exist_ok=True)
-                    file_size = asset_usage.abspath.stat().st_size
-                    shutil.copy2(asset_usage.abspath, target_asset_path)
-                    self.copied_paths.add(resolved)
-                    # Add to copy_map for remapping (blend files and image/texture files)
-                    if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
-                        self.copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
+                    file_size = src_path.stat().st_size
+                    shutil.copy2(src_path, target_asset_path)
+                    self.copied_paths.add(src_resolved)
+                    self.copied_paths.add(stale_resolved)
+                    # Register for remap (include .py/texts etc. so stale keys rebind)
+                    _copy_map_register(self.copy_map, stale_path, src_resolved, target_asset_path)
                     if (i < 5) or (i % 50 == 0):
-                        print(f"[BBP Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
+                        print(f"[BBP Pack]   Copied: {src_path.name} ({file_size} bytes)")
                 except Exception as e:
-                    print(f"[BBP Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
-                    self.missing_on_copy.append(asset_usage.abspath)
+                    print(f"[BBP Pack]   ERROR copying asset {src_path.name}: {type(e).__name__}: {str(e)}")
+                    self.missing_on_copy.append(stale_path)
             
             self.assets_copied = batch_end
             
@@ -1561,6 +1596,7 @@ class IncrementalPacker:
                         self.common_root,
                         self.target_path,
                         ensure_autopack=self.autopack_on_save,
+                        search_roots=self.search_roots,
                     )
                     if unresolved:
                         print(f"[BBP Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
@@ -1820,14 +1856,27 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     # Copy other assets
     total_assets = sum(len(links) for links in asset_usages.values())
     print(f"[BBP Pack] Copying {total_assets} asset files...")
+    existing_for_roots = [
+        a.abspath
+        for links in asset_usages.values()
+        for a in links
+        if a.abspath.exists()
+    ]
+    search_roots = collect_search_roots(common_root, existing_for_roots, top_level_blend_abs.parent if top_level_blend_abs else None)
+    recovery_cache: dict = {}
+    print(f"[BBP Pack] Stale-path search roots: {len(search_roots)}")
     asset_count = 0
     seen_resolved = set()
     for lib, links_to in asset_usages.items():
         for asset_usage in links_to:
-            resolved = asset_usage.abspath.resolve()
-            if resolved in copied_paths or resolved in seen_resolved:
+            stale_path = asset_usage.abspath
+            try:
+                stale_resolved = stale_path.resolve()
+            except OSError:
+                stale_resolved = Path(stale_path)
+            if stale_resolved in copied_paths or stale_resolved in seen_resolved:
                 continue
-            seen_resolved.add(resolved)
+            seen_resolved.add(stale_resolved)
             asset_count += 1
             # Update progress every 10 files or every 1% of total
             if asset_count % 10 == 0 or (total_assets > 0 and asset_count % max(1, total_assets // 100) == 0):
@@ -1838,33 +1887,44 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             if cancel_check and cancel_check():
                 raise InterruptedError("Packing cancelled by user")
             
+            if _is_excluded_media_path(stale_path, exclude_av):
+                print(f"[BBP Pack]   Skipping excluded media: {stale_path.name}")
+                continue
+            src_path = stale_path
+            if not src_path.exists():
+                recovered = recover_stale_path(stale_path, search_roots, recovery_cache)
+                if recovered is None:
+                    print(f"[BBP Pack]   WARNING: Asset does not exist: {stale_path}")
+                    missing_on_copy.append(stale_path)
+                    continue
+                src_path = recovered
             try:
-                asset_relpath = resolved.relative_to(common_root)
+                src_resolved = src_path.resolve()
+            except OSError:
+                src_resolved = Path(src_path)
+            if src_resolved in copied_paths:
+                dest = copy_map.get(_norm_copy_map_key(src_resolved))
+                if dest:
+                    copy_map[_norm_copy_map_key(stale_path)] = dest
+                continue
+            try:
+                asset_relpath = src_resolved.relative_to(common_root)
             except ValueError:
-                asset_relpath = compute_target_relpath(resolved, common_root)
-            
-            if _is_excluded_media_path(asset_usage.abspath, exclude_av):
-                print(f"[BBP Pack]   Skipping excluded media: {asset_usage.abspath.name}")
-                continue
-            if not asset_usage.abspath.exists():
-                print(f"[BBP Pack]   WARNING: Asset does not exist: {asset_usage.abspath}")
-                missing_on_copy.append(asset_usage.abspath)
-                continue
+                asset_relpath = compute_target_relpath(src_resolved, common_root)
             
             target_asset_path = target_path / asset_relpath
             try:
                 target_asset_path.parent.mkdir(parents=True, exist_ok=True)
-                file_size = asset_usage.abspath.stat().st_size
-                shutil.copy2(asset_usage.abspath, target_asset_path)
-                copied_paths.add(resolved)
-                # Add to copy_map for remapping (blend files and image/texture files)
-                if asset_usage.abspath.suffix.lower() in (".blend", ".png", ".jpg", ".jpeg", ".tga", ".tiff", ".exr", ".hdr", ".bmp", ".dds", ".mp4", ".avi", ".mov", ".usd", ".usdc", ".usda"):
-                    copy_map[_norm_copy_map_key(resolved)] = str(target_asset_path.resolve())
+                file_size = src_path.stat().st_size
+                shutil.copy2(src_path, target_asset_path)
+                copied_paths.add(src_resolved)
+                copied_paths.add(stale_resolved)
+                _copy_map_register(copy_map, stale_path, src_resolved, target_asset_path)
                 if asset_count <= 5 or asset_count % 50 == 0:  # Log first 5 and every 50th
-                    print(f"[BBP Pack]   Copied: {asset_usage.abspath.name} ({file_size} bytes)")
+                    print(f"[BBP Pack]   Copied: {src_path.name} ({file_size} bytes)")
             except Exception as e:
-                print(f"[BBP Pack]   ERROR copying asset {asset_usage.abspath.name}: {type(e).__name__}: {str(e)}")
-                missing_on_copy.append(asset_usage.abspath)
+                print(f"[BBP Pack]   ERROR copying asset {src_path.name}: {type(e).__name__}: {str(e)}")
+                missing_on_copy.append(stale_path)
     
     print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
     missing_files_report = list(missing_on_copy)
@@ -1924,6 +1984,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 common_root,
                 target_path,
                 ensure_autopack=autopack_on_save,
+                search_roots=search_roots,
             )
     print(f"[BBP Pack] Finished remapping library paths")
     
