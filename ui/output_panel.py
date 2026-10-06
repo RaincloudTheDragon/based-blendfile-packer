@@ -15,6 +15,16 @@ class BBP_PT_output_panel(Panel):
     bl_region_type = 'WINDOW'
     bl_context = "output"
 
+    def draw_header(self, context):
+        # Prefs cog — same pattern as Atomic / RBST
+        from .preferences_ui import _get_addon_module_name
+        layout = self.layout
+        layout.operator(
+            "preferences.addon_show",
+            text="",
+            icon="PREFERENCES",
+        ).module = _get_addon_module_name()
+
     def draw(self, context):
         layout = self.layout
         scene = context.scene
