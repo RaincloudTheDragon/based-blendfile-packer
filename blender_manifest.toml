@@ -17,7 +17,4 @@ tags = ["render", "pack", "utility", "assets"]
 # Python modules to load for this add-on
 modules = ["based_blendfile_packer"]
 
-# Blender Asset Tracer: v2 wheel for 5.2 LTS (5.1+); v1 vendored for 4.5 LTS.
-wheels = [
-  "./wheels/blender_asset_tracer-2.1.0-py3-none-any.whl",
-]
+# BAT v1 + v2 wheels live under ./wheels/ and are loaded at runtime (see utils/wheels.py). No longer listed here; extension wheels install under one package name and cannot coexist.

@@ -1,14 +1,13 @@
-"""
-Asset usage discovery via official Blender Asset Tracer (BAT).
+"""Asset usage discovery via official Blender Asset Tracer (BAT).
 
 Replaces the January 2026 fork of BAT v2 alpha (``batter/asset_usage.py``).
 
 Supported Blender targets and BAT backends:
 
-- **4.5 LTS** — BAT v1, vendored under ``vendor/bat_v1/`` (standalone blend parsing).
-- **5.2 LTS** — BAT v2, bundled extension wheel (in-Blender ``file_usage`` API).
+- **4.5 LTS** — BAT v1 wheel (``blender_asset_tracer-1.*.whl``; standalone blend parsing).
+- **5.2 LTS** — BAT v2 wheel (``blender_asset_tracer-2.*.whl``; in-Blender ``file_usage`` API).
 
-Both backends are always shipped: the v2 wheel is only installed on Blender 5.1+ (Python 3.13), so it cannot conflict with the vendored v1 tree on 4.5 LTS.
+Both wheels ship under ``wheels/`` and are loaded at runtime (Flamenco-style), not via ``blender_manifest.toml``, so the same package name can resolve to different versions.
 
 Packed datablocks are filtered locally so their filepaths are not copied or treated as missing:
 
@@ -22,25 +21,24 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import importlib.util
-import sys
 from collections import defaultdict
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Literal
 
 import bpy
 from bpy.types import Library
 
-from . import version
+from . import version, wheels
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
 BatBackend = Literal["v1", "v2"]
 
-_ADDON_ROOT = Path(__file__).resolve().parent.parent
-_BAT_V1_VENDOR = _ADDON_ROOT / "vendor" / "bat_v1"
-_BAT_V1_INSTALLED = False
+# Cached module objects from load_wheel (kept after sys.modules restore).
+_BAT_V1_TRACE: ModuleType | None = None
+_BAT_V2_FILE_USAGE: ModuleType | None = None
 
 
 @dataclasses.dataclass
@@ -74,72 +72,40 @@ def get_bat_backend() -> BatBackend:
 
 
 def uses_bat_v2() -> bool:
-    """True when BAT v2 from the bundled wheel is active (Blender 5.1+ / 5.2 LTS)."""
-    if not version.uses_bat_v2_blender_version():
-        return False
-    try:
-        import blender_asset_tracer.file_usage  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """True when this Blender should use the BAT v2 wheel (5.1+ / 5.2 LTS)."""
+    return version.uses_bat_v2_blender_version()
 
 
 def uses_bat_v1() -> bool:
-    """True when vendored BAT v1 is the active backend (Blender 4.5 LTS)."""
+    """True when the BAT v1 wheel is the active backend (Blender 4.5 LTS)."""
     return not uses_bat_v2()
 
 
-def _install_bat_v1_vendor() -> None:
-    """Register vendored BAT v1 packages under ``blender_asset_tracer``."""
-    global _BAT_V1_INSTALLED
-    if _BAT_V1_INSTALLED:
-        return
-
-    existing = sys.modules.get("blender_asset_tracer")
-    if existing is not None and getattr(existing, "__version__", "").startswith("2."):
-        return
-
-    package_root = _BAT_V1_VENDOR / "blender_asset_tracer"
-    if not package_root.is_dir():
-        raise ImportError(
-            f"Vendored BAT v1 not found at {package_root}. "
-            "Run the Sync BAT wheels workflow or refresh vendor/bat_v1/."
+def _bat_v1_trace() -> ModuleType:
+    """Return BAT v1 ``trace`` from the bundled ``blender_asset_tracer-1.*.whl``."""
+    global _BAT_V1_TRACE
+    if _BAT_V1_TRACE is None:
+        # Load toplevel + trace together so package-relative imports stay consistent.
+        _toplevel, _BAT_V1_TRACE = wheels.load_wheel(
+            "blender_asset_tracer",
+            ("trace",),
+            filename_prefix="blender_asset_tracer-1.",
         )
-
-    py_files = sorted(package_root.rglob("*.py"), key=lambda path: len(path.parts))
-    for py_file in py_files:
-        rel = py_file.relative_to(_BAT_V1_VENDOR).with_suffix("")
-        module_name = ".".join(rel.parts)
-        if module_name in sys.modules:
-            continue
-
-        spec = importlib.util.spec_from_file_location(module_name, py_file)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Could not load BAT v1 module spec for {py_file}")
-
-        module = importlib.util.module_from_spec(spec)
-        if py_file.name == "__init__.py":
-            module.__package__ = ".".join(module_name.split(".")[:-1]) or None
-        module.__file__ = str(py_file)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-
-    _BAT_V1_INSTALLED = True
+        del _toplevel
+    return _BAT_V1_TRACE
 
 
-def _bat_v1_trace():
-    """Return BAT v1 ``trace`` module after ensuring the vendor tree is loaded."""
-    _install_bat_v1_vendor()
-    import blender_asset_tracer.trace as bat_trace
-
-    return bat_trace
-
-
-def _bat_v2_file_usage():
-    """Return BAT v2 ``file_usage`` module (wheel must already be installed)."""
-    from blender_asset_tracer import file_usage as bat_fu
-
-    return bat_fu
+def _bat_v2_file_usage() -> ModuleType:
+    """Return BAT v2 ``file_usage`` from the bundled ``blender_asset_tracer-2.*.whl``."""
+    global _BAT_V2_FILE_USAGE
+    if _BAT_V2_FILE_USAGE is None:
+        _toplevel, _BAT_V2_FILE_USAGE = wheels.load_wheel(
+            "blender_asset_tracer",
+            ("file_usage",),
+            filename_prefix="blender_asset_tracer-2.",
+        )
+        del _toplevel
+    return _BAT_V2_FILE_USAGE
 
 
 @functools.lru_cache(maxsize=1024)

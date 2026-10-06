@@ -1,3 +1,3 @@
-# BAT v1 — Blender 4.5 LTS (vendored under vendor/bat_v1/).
-# Dependabot bumps this pin; .github/workflows/sync-bat-wheels.yml refreshes the vendor tree.
+# BAT v1 — Blender 4.5 LTS (shipped as wheels/blender_asset_tracer-1.*.whl).
+# Dependabot bumps this pin; .github/workflows/sync-bat-wheels.yml refreshes wheels/.
 blender-asset-tracer==1.23

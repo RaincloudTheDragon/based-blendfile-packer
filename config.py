@@ -10,7 +10,7 @@ ADDON_ID = "based_blendfile_packer"
 MIN_BLENDER_VERSION = (4, 5, 0)
 SUPPORTED_LTS_TARGETS = ("4.5", "5.2")
 
-# BAT v2 requires Blender 5.1+; 4.5 LTS uses vendored BAT v1.
+# BAT v2 requires Blender 5.1+; 4.5 LTS uses the BAT v1 wheel.
 BAT_V2_MIN_BLENDER_VERSION = (5, 1, 0)
 
 # Debug mode

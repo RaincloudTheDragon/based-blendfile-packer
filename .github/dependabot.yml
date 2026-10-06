@@ -1,5 +1,5 @@
 # Track BAT releases and GitHub Actions updates.
-# Wheel/vendor sync is handled by .github/workflows/sync-bat-wheels.yml.
+# Wheel sync is handled by .github/workflows/sync-bat-wheels.yml.
 version: 2
 updates:
   - package-ecosystem: pip
