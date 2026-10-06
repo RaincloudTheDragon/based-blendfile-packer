@@ -2,7 +2,9 @@
 Export operations for BasedBlendfilePacker.
 """
 
+import json
 import os
+import re
 import zipfile
 import tempfile
 import subprocess
@@ -10,6 +12,179 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import bpy
+
+# Farm ZIP paths must be plain ASCII without specials like ``#`` (SheepIt and similar).
+_FARM_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._\- ]+")
+
+
+def sanitize_path_component(name: str) -> str:
+    """Return a farm-safe single path component (ASCII letters/digits/._- / space)."""
+    cleaned = _FARM_UNSAFE_RE.sub("_", name or "")
+    cleaned = cleaned.strip(" .")
+    return cleaned or "_unnamed"
+
+
+def path_component_is_farm_unsafe(name: str) -> bool:
+    """True when a file/dir name would be rejected by common render-farm ZIP checks."""
+    return sanitize_path_component(name) != name
+
+
+def sanitize_pack_tree_for_farms(directory: Path) -> dict[str, str]:
+    """Rename farm-unsafe files/dirs under ``directory``. Returns ``{old_abs: new_abs}``."""
+    directory = Path(directory).resolve()
+    if not directory.is_dir():
+        return {}
+
+    # Deepest paths first so files rename before their parent directories.
+    candidates: list[Path] = []
+    for root, dirs, files in os.walk(directory, topdown=False):
+        root_path = Path(root)
+        for name in files:
+            if path_component_is_farm_unsafe(name):
+                candidates.append(root_path / name)
+        for name in dirs:
+            if path_component_is_farm_unsafe(name):
+                candidates.append(root_path / name)
+
+    renames: dict[str, str] = {}
+    for old_path in candidates:
+        if not old_path.exists():
+            continue
+        safe_name = sanitize_path_component(old_path.name)
+        new_path = old_path.with_name(safe_name)
+        # Avoid clobbering an existing sibling.
+        if new_path.exists() and new_path.resolve() != old_path.resolve():
+            stem, suffix = new_path.stem, new_path.suffix
+            n = 2
+            while True:
+                candidate = old_path.with_name(f"{stem}_{n}{suffix}")
+                if not candidate.exists():
+                    new_path = candidate
+                    break
+                n += 1
+        try:
+            old_path.rename(new_path)
+        except OSError as e:
+            print(f"[BBP Export] WARNING: could not rename {old_path} -> {new_path}: {e}")
+            continue
+        renames[str(old_path.resolve())] = str(new_path.resolve())
+        print(f"[BBP Export] Farm-safe rename: {old_path.name} -> {new_path.name}")
+
+    if renames:
+        print(f"[BBP Export] Sanitized {len(renames)} farm-unsafe path(s) under {directory}")
+    return renames
+
+
+def rewrite_blend_paths_after_farm_sanitize(directory: Path, renames: dict[str, str]) -> None:
+    """Update external paths inside packed .blend files after farm-safe renames."""
+    if not renames:
+        return
+
+    directory = Path(directory).resolve()
+    blends = sorted(directory.rglob("*.blend"))
+    # Skip Blender backup numbered blends if any remain.
+    blends = [b for b in blends if not re.search(r"\.blend\d+$", b.name)]
+    if not blends:
+        return
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as handle:
+        json.dump(renames, handle)
+        renames_file = Path(handle.name)
+
+    renames_file_str = str(renames_file).replace("\\", "\\\\")
+    script = (
+        "import bpy, json, os\n"
+        "from pathlib import Path\n"
+        f"renames = json.loads(Path(r'{renames_file_str}').read_text(encoding='utf-8'))\n"
+        "def norm(p):\n"
+        "    s = str(Path(p).resolve())\n"
+        "    return s.lower().replace(chr(92), '/') if os.name == 'nt' else s\n"
+        "renames_norm = {norm(k): v for k, v in renames.items()}\n"
+        "blend_dir = Path(bpy.data.filepath).parent\n"
+        "bpy.context.preferences.filepaths.use_relative_paths = True\n"
+        "changed = [0]\n"
+        "def rewrite_fp(fp):\n"
+        "    if not fp or fp in ('', '<builtin>', '<memory>'):\n"
+        "        return fp\n"
+        "    if fp.startswith('//'):\n"
+        "        abs_p = (blend_dir / fp[2:]).resolve()\n"
+        "    else:\n"
+        "        abs_p = Path(fp).resolve()\n"
+        "    new_abs = renames_norm.get(norm(abs_p))\n"
+        "    if not new_abs:\n"
+        "        return fp\n"
+        "    try:\n"
+        "        rel = bpy.path.relpath(new_abs)\n"
+        "    except Exception:\n"
+        "        rel = new_abs\n"
+        "    changed[0] += 1\n"
+        "    return rel\n"
+        "for lib in bpy.data.libraries:\n"
+        "    if getattr(lib, 'packed_file', None):\n"
+        "        continue\n"
+        "    lib.filepath = rewrite_fp(lib.filepath)\n"
+        "for img in bpy.data.images:\n"
+        "    if getattr(img, 'packed_file', None):\n"
+        "        continue\n"
+        "    if img.filepath:\n"
+        "        img.filepath = rewrite_fp(img.filepath)\n"
+        "for coll_name in ('fonts', 'sounds', 'movieclips', 'volumes', 'texts'):\n"
+        "    coll = getattr(bpy.data, coll_name, None)\n"
+        "    if coll is None:\n"
+        "        continue\n"
+        "    for item in coll:\n"
+        "        if getattr(item, 'packed_file', None):\n"
+        "            continue\n"
+        "        fp = getattr(item, 'filepath', None)\n"
+        "        if fp:\n"
+        "            item.filepath = rewrite_fp(fp)\n"
+        "bpy.ops.wm.save_mainfile(compress=True)\n"
+        "print('BBP_FARM_REWRITE_CHANGED:' + str(changed[0]))\n"
+    )
+
+    try:
+        for blend_path in blends:
+            print(f"[BBP Export] Rewriting farm-safe paths in: {blend_path.name}")
+            result = subprocess.run(
+                [
+                    "blender",
+                    "--factory-startup",
+                    "-b",
+                    str(blend_path),
+                    "--python-expr",
+                    script,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                print(
+                    f"[BBP Export] WARNING: path rewrite failed for {blend_path.name} "
+                    f"(code {result.returncode})"
+                )
+                if result.stderr:
+                    print(f"[BBP Export]   {result.stderr[:300]}")
+            elif result.stdout:
+                for line in result.stdout.splitlines():
+                    if line.startswith("BBP_FARM_REWRITE_CHANGED:"):
+                        print(f"[BBP Export]   Updated {line.split(':', 1)[1]} path(s)")
+    finally:
+        try:
+            renames_file.unlink()
+        except OSError:
+            pass
+
+
+def prepare_pack_directory_for_farm_zip(directory: Path) -> int:
+    """Sanitize farm-unsafe names in a pack tree and rewrite .blend references. Returns rename count."""
+    renames = sanitize_pack_tree_for_farms(directory)
+    if renames:
+        rewrite_blend_paths_after_farm_sanitize(directory, renames)
+    return len(renames)
 
 
 def apply_frame_range_to_blend(blend_path: Path, frame_start: int, frame_end: int, frame_step: int) -> None:

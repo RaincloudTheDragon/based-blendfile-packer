@@ -2333,7 +2333,10 @@ class BBP_OT_pack_zip(Operator):
                     pack_settings.pack_progress = 65.0
                     pack_settings.pack_status_message = "Creating ZIP archive..."
                     
-                    from .export_ops import create_zip_from_directory
+                    from .export_ops import (
+                        create_zip_from_directory,
+                        prepare_pack_directory_for_farm_zip,
+                    )
                     
                     self._zip_path = self._target_path.parent / f"{self._target_path.name}.zip"
                     print(f"[BBP Pack] DEBUG: Creating ZIP: {self._zip_path}")
@@ -2356,6 +2359,12 @@ class BBP_OT_pack_zip(Operator):
                         return bool(pack_settings.cancel_requested)
                     
                     try:
+                        # SheepIt / farms reject ``#`` and non-ASCII in ZIP paths (e.g. ``#000000.png``).
+                        pack_settings.pack_status_message = "Sanitizing farm-unsafe paths..."
+                        renamed = prepare_pack_directory_for_farm_zip(self._target_path)
+                        if renamed:
+                            print(f"[BBP Pack] Farm-safe path sanitization renamed {renamed} path(s)")
+
                         exclude_av = getattr(context.scene.bbp_pack, 'exclude_av', False)
                         create_zip_from_directory(
                             self._target_path,

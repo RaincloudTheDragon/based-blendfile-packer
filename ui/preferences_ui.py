@@ -90,7 +90,17 @@ def _sync_default_output_path(prefs, context):
     if not prefs.default_output_path:
         return
 
-    for scene in bpy.data.scenes:
+    # Sidecar restore during register can run while bpy.data is still _RestrictData.
+    scenes = getattr(bpy.data, "scenes", None)
+    if scenes is None:
+        return
+
+    try:
+        scene_iter = list(scenes)
+    except Exception:
+        return
+
+    for scene in scene_iter:
         if hasattr(scene, 'bbp_pack') and scene.bbp_pack:
             if not scene.bbp_pack.output_path:
                 scene.bbp_pack.output_path = prefs.default_output_path
