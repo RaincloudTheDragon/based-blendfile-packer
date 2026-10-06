@@ -1055,212 +1055,107 @@ def _get_project_size_limit_bytes(context=None):
 def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None) -> tuple[list[Path], list[Path]]:
     """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
 
-    Args:
-        blend_path: Path to the blend file.
-        max_size_bytes: Max size in bytes for a single linked file (over this = oversized). None = 2GB.
+    Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the top-level blend stays hollow (~source size) while the ZIP still holds the trees.
 
     Returns:
-        Tuple of (missing_files: list[Path], oversized_files: list[Path])
-        - missing_files: Files that don't exist and couldn't be packed
-        - oversized_files: Files over max_size_bytes that Blender can't pack
+        Tuple of (missing_files, oversized_files)
     """
+    import json
+    import tempfile
+
     if max_size_bytes is None:
         max_size_bytes = 2 * 1024 * 1024 * 1024
-    
-    script = (
-        "import bpy\n"
-        "from pathlib import Path\n"
-        "print('=== Pack Linked Operation ===')\n"
-        "print('Processing: ' + bpy.path.basename(bpy.data.filepath))\n"
-        "print('Libraries found:', len(bpy.data.libraries))\n"
-        "missing_files = []\n"
-        "oversized_files = []\n"
-        "lib_info = []\n"
-        "for lib in list(bpy.data.libraries):\n"
-        "    lib_path = Path(lib.filepath)\n"
-        "    if lib.filepath.startswith('//'):\n"
-        "        lib_path = Path(bpy.data.filepath).parent / lib.filepath[2:]\n"
-        "    try:\n"
-        "        exists = lib_path.exists()\n"
-        "    except (OSError, PermissionError):\n"
-        "        exists = False\n"
-        "    if not exists:\n"
-        "        missing_files.append(str(lib_path))\n"
-        "        lib_info.append((lib.name, str(lib_path), 'missing'))\n"
-        "        print('  Library (MISSING or inaccessible):', lib.name, ', path:', lib.filepath)\n"
-        "    else:\n"
-        "        try:\n"
-        "            file_size = lib_path.stat().st_size\n"
-        "        except (OSError, PermissionError):\n"
-        "            missing_files.append(str(lib_path))\n"
-        "            lib_info.append((lib.name, str(lib_path), 'missing'))\n"
-        "            print('  Library (inaccessible):', lib.name, ', path:', lib.filepath)\n"
-        "            continue\n"
-        "        file_size_gb = file_size / (1024 * 1024 * 1024)\n"
-        "        if file_size > " + str(max_size_bytes) + ":\n"
-        "            oversized_files.append(str(lib_path))\n"
-        "            lib_info.append((lib.name, str(lib_path), 'oversized'))\n"
-        "            print('  Library (OVER limit, cannot pack):', lib.name, ', path:', lib.filepath, ', size:', round(file_size_gb, 2), 'GB')\n"
-        "        else:\n"
-        "            lib_info.append((lib.name, str(lib_path), 'ok'))\n"
-        "            print('  Library (found,', round(file_size_gb, 2), 'GB):', lib.name, ', path:', lib.filepath)\n"
-        "missing_lib_names = [name for name, path, status in lib_info if status == 'missing']\n"
-        "if missing_lib_names:\n"
-        "    print('WARNING:', len(missing_lib_names), 'linked libraries not found, removing from blend before pack')\n"
-        "    for lib_name in missing_lib_names:\n"
-        "        try:\n"
-        "            lib = bpy.data.libraries.get(lib_name)\n"
-        "            if lib:\n"
-        "                bpy.data.libraries.remove(lib)\n"
-        "                print('  Removed missing library:', lib_name)\n"
-        "        except Exception as e:\n"
-        "            print('  Could not remove library', lib_name, ':', e)\n"
-        "if oversized_files:\n"
-        "    print('WARNING:', len(oversized_files), 'linked libraries are over size limit and cannot be packed by Blender')\n"
-        "try:\n"
-        "    bpy.ops.file.make_paths_relative()\n"
-        "    print('Made paths relative')\n"
-        "except Exception as e:\n"
-        "    print('Warning: make_paths_relative failed: ' + str(e))\n"
-        "packed_count = 0\n"
-        "pack_errors = []\n"
-        "print('Libraries before pack: ' + str(len(bpy.data.libraries)))\n"
-        "for lib in bpy.data.libraries:\n"
-        "    print('  - ' + lib.name + ': ' + lib.filepath)\n"
-        "try:\n"
-        "    print('Starting pack_libraries()...')\n"
-        "    result = bpy.ops.file.pack_libraries()\n"
-        "    print('pack_libraries() returned: ' + str(result))\n"
-        "    packed_count = len(bpy.data.libraries)\n"
-        "    print('pack_libraries() completed successfully, ' + str(packed_count) + ' libraries processed')\n"
-        "except Exception as e:\n"
-        "    error_msg = type(e).__name__ + ': ' + str(e)\n"
-        "    pack_errors.append(error_msg)\n"
-        "    print('Warning: pack_libraries() failed: ' + error_msg)\n"
-        "print('Libraries after pack: ' + str(len(bpy.data.libraries)))\n"
-        "for lib in bpy.data.libraries:\n"
-        "    is_packed = hasattr(lib, 'packed_file') and lib.packed_file is not None\n"
-        "    print('  - ' + lib.name + ': packed=' + str(is_packed))\n"
-        "try:\n"
-        "    print('Running pack_all() to ensure all data is packed...')\n"
-        "    bpy.ops.file.pack_all()\n"
-        "    print('pack_all() completed')\n"
-        "except Exception as e:\n"
-        "    print('pack_all() warning: ' + str(e))\n"
-        "try:\n"
-        "    fp = bpy.context.preferences.filepaths\n"
-        "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
-        "        if hasattr(fp, k):\n"
-        "            try:\n"
-        "                setattr(fp, k, True)\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "except Exception:\n"
-        "    pass\n"
-        "print('Saving file...')\n"
-        "bpy.ops.wm.save_mainfile(compress=True)\n"
-        "print('=== Pack Linked Complete (packed: ' + str(packed_count) + ', missing: ' + str(len(missing_files)) + ', oversized: ' + str(len(oversized_files)) + ') ===')\n"
-        "for mf in missing_files:\n"
-        "    print('MISSING_FILE: ' + str(mf))\n"
-        "for of in oversized_files:\n"
-        "    print('OVERSIZED_FILE: ' + str(of))\n"
-        "for err in pack_errors:\n"
-        "    print('PACK_ERROR: ' + str(err))\n"
-    )
-    
-    stdout, stderr, returncode = _run_blender_script(script, blend_path, timeout=600)  # 10 minute timeout for pack_linked
-    
-    # Parse missing and oversized files from output
-    missing_files = []
-    oversized_files = []
+
+    script_path = Path(__file__).resolve().parent / "pack_linked_blend.py"
+    cfg_file = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump({"max_size_bytes": int(max_size_bytes)}, f)
+            cfg_file = Path(f.name)
+        stdout, stderr, returncode = _run_blender_python_file(
+            script_path, blend_path, config_path=cfg_file, timeout=600
+        )
+    finally:
+        if cfg_file is not None:
+            try:
+                cfg_file.unlink()
+            except OSError:
+                pass
+
+    missing_files: list[Path] = []
+    oversized_files: list[Path] = []
+    unpacked_libs: list[str] = []
+    pack_errors: list[str] = []
     if stdout:
         for line in stdout.splitlines():
-            if line.startswith('MISSING_FILE:'):
-                missing_path = line.replace('MISSING_FILE:', '').strip()
+            if line.startswith("MISSING_FILE:"):
                 try:
-                    missing_files.append(Path(missing_path))
+                    missing_files.append(Path(line.replace("MISSING_FILE:", "").strip()))
                 except Exception:
                     pass
-            elif line.startswith('OVERSIZED_FILE:'):
-                oversized_path = line.replace('OVERSIZED_FILE:', '').strip()
+            elif line.startswith("OVERSIZED_FILE:"):
                 try:
-                    oversized_files.append(Path(oversized_path))
+                    oversized_files.append(Path(line.replace("OVERSIZED_FILE:", "").strip()))
                 except Exception:
                     pass
-    
-    # Also check for Blender's standard missing file warnings
+            elif line.startswith("UNPACKED_LIB:"):
+                unpacked_libs.append(line.replace("UNPACKED_LIB:", "").strip())
+            elif line.startswith("PACK_ERROR:"):
+                pack_errors.append(line.replace("PACK_ERROR:", "").strip())
+
     combined_output = (stdout or "") + "\n" + (stderr or "")
-    import re
-    # Pattern: "Warning, files not found: //path/to/file.blend"
-    missing_patterns = [
+    for pattern in (
         r"Warning, files not found:\s*(.+)",
         r"Unable to pack file, source path '([^']+)' not found",
+        r"Cannot pack absolute file:\s*'([^']+)'",
         r"File not found:\s*(.+)",
-    ]
-    for pattern in missing_patterns:
+    ):
         for match in re.finditer(pattern, combined_output, re.IGNORECASE):
             missing_path_str = match.group(1).strip()
-            # Handle relative paths (//path)
-            if missing_path_str.startswith('//'):
+            if missing_path_str.startswith("//"):
                 try:
-                    # Convert relative path to absolute
-                    blend_dir = blend_path.parent
-                    rel_path = missing_path_str[2:]
-                    missing_path = (blend_dir / rel_path).resolve()
+                    missing_path = (blend_path.parent / missing_path_str[2:]).resolve()
                 except Exception:
                     missing_path = Path(missing_path_str)
             else:
                 missing_path = Path(missing_path_str)
             if missing_path not in missing_files:
                 missing_files.append(missing_path)
-    
-    # Check for 2GB size limit errors in Blender output
-    size_error_patterns = [
-        r"file.*too large.*2.*GB",
-        r"exceeds.*2.*GB",
-        r"over.*2.*GB",
-        r"larger than.*2.*GB",
-    ]
-    for pattern in size_error_patterns:
-        for match in re.finditer(pattern, combined_output, re.IGNORECASE):
-            # Try to extract file path from context
-            context_start = max(0, match.start() - 200)
-            context_end = min(len(combined_output), match.end() + 200)
-            context = combined_output[context_start:context_end]
-            # Look for file paths in the context
-            path_matches = re.finditer(r"['\"]([^'\"]+\.blend)['\"]", context, re.IGNORECASE)
-            for path_match in path_matches:
-                path_str = path_match.group(1)
-                try:
-                    oversized_path = Path(path_str)
-                    if oversized_path.exists() and oversized_path not in oversized_files:
-                        oversized_files.append(oversized_path)
-                except Exception:
-                    pass
-    
+
     if missing_files:
         print(f"[BBP Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
-        for mf in missing_files[:5]:  # Show first 5
+        for mf in missing_files[:5]:
             print(f"[BBP Pack]     - {mf.name if mf.name else mf}")
         if len(missing_files) > 5:
             print(f"[BBP Pack]     ... and {len(missing_files) - 5} more")
-        print(f"[BBP Pack]   Note: Missing files cannot be packed; pack will abort after linked packing finishes.")
-    
+
     if oversized_files:
-        print(f"[BBP Pack]   WARNING: {len(oversized_files)} linked files could not be packed (files over size limit):")
-        for of in oversized_files[:5]:  # Show first 5
+        print(f"[BBP Pack]   WARNING: {len(oversized_files)} linked files could not be packed (over size limit):")
+        for of in oversized_files[:5]:
             file_size_gb = of.stat().st_size / (1024 * 1024 * 1024) if of.exists() else 0
             print(f"[BBP Pack]     - {of.name if of.name else of} ({file_size_gb:.2f} GB)")
         if len(oversized_files) > 5:
             print(f"[BBP Pack]     ... and {len(oversized_files) - 5} more")
-        print(f"[BBP Pack]   Note: Blender cannot pack linked files over the project size limit. These libraries will remain as external references.")
-        print(f"[BBP Pack]   To fix: Reduce the size of these files or split them into smaller files.")
-    
+
+    if unpacked_libs:
+        print(f"[BBP Pack]   ERROR: {len(unpacked_libs)} libraries still unpacked after pack_libraries:")
+        for name in unpacked_libs[:8]:
+            print(f"[BBP Pack]     - {name}")
+        _pack_diag(f"pack_linked left unpacked: {unpacked_libs}")
+
+    if pack_errors:
+        for err in pack_errors:
+            print(f"[BBP Pack]   PACK_ERROR: {err}")
+
     if returncode != 0:
         print(f"[BBP Pack] WARNING: pack_linked_in_blend returned non-zero exit code: {returncode}")
         if stderr:
             print(f"[BBP Pack]   Error details: {stderr[:500]}")
-    
+
+    # Surface hollow-pack failure as missing so end-of-pack report is honest.
+    for name in unpacked_libs:
+        missing_files.append(Path(name))
+
     return missing_files, oversized_files
 
 
@@ -1861,6 +1756,25 @@ class IncrementalPacker:
                 print(f"[BBP Pack] Packing linked libraries...")
                 if self.progress_callback:
                     self.progress_callback(80.0, "Packing linked libraries...")
+                # Bottom-up: dependencies first, top-level last so it embeds already-packed children.
+                if self.top_level_target_blend and self.to_remap:
+                    try:
+                        top_key = self.top_level_target_blend.resolve()
+                    except OSError:
+                        top_key = Path(self.top_level_target_blend)
+                    rest, tops = [], []
+                    for p in self.to_remap:
+                        try:
+                            key = Path(p).resolve()
+                        except OSError:
+                            key = Path(p)
+                        (tops if key == top_key else rest).append(p)
+                    if tops:
+                        self.to_remap = rest + tops
+                        _pack_diag(
+                            f"pack_linked order: {len(rest)} deps then top-level {[p.name for p in tops]}",
+                            verbose_only=True,
+                        )
             
             # Process one blend file per batch
             if self.pack_linked_index < len(self.to_remap):
@@ -2255,6 +2169,21 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             print(f"[BBP Pack] Packing linked libraries...")
             if progress_callback:
                 progress_callback(80.0, "Packing linked libraries...")
+            # Bottom-up: deps first, top-level last.
+            if top_level_target_blend and to_remap:
+                try:
+                    top_key = top_level_target_blend.resolve()
+                except OSError:
+                    top_key = Path(top_level_target_blend)
+                rest, tops = [], []
+                for p in to_remap:
+                    try:
+                        key = Path(p).resolve()
+                    except OSError:
+                        key = Path(p)
+                    (tops if key == top_key else rest).append(p)
+                if tops:
+                    to_remap = rest + tops
             missing_files_all = []
             for i, blend_to_fix in enumerate(to_remap, 1):
                 if cancel_check and cancel_check():
