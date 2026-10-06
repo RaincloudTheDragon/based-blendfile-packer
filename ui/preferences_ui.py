@@ -5,7 +5,7 @@ Preferences UI for BasedBlendfilePacker.
 import sys
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 from .. import config
 
 
@@ -29,6 +29,16 @@ def _get_addon_module_name():
     return module_name
 
 
+def _save_prefs_sidecar(prefs):
+    """Persist reload-safe sidecar unless a restore is in progress."""
+    try:
+        from ..utils.prefs_sidecar import is_restoring, save_sidecar
+        if not is_restoring():
+            save_sidecar(prefs)
+    except Exception:
+        pass
+
+
 class BBP_AddonPreferences(AddonPreferences):
     """Addon preferences for BasedBlendfilePacker."""
     bl_idname = _get_addon_module_name()
@@ -41,12 +51,25 @@ class BBP_AddonPreferences(AddonPreferences):
         update=lambda self, context: _on_default_output_path_update(self, context),
     )
 
+    defer_to_flamenco_bat: BoolProperty(
+        name="Defer to Flamenco BAT",
+        description="When Flamenco is enabled, load BAT from Flamenco's wheels instead of BBP's (avoids version conflicts on Flamenco job submit)",
+        default=True,
+        update=lambda self, context: _save_prefs_sidecar(self),
+    )
+
     def draw(self, context):
         layout = self.layout
 
         box = layout.box()
         box.label(text="Output Settings:", icon='FILE_FOLDER')
         box.prop(self, "default_output_path")
+
+        layout.separator()
+
+        box = layout.box()
+        box.label(text="Compatibility:", icon='PLUGIN')
+        box.prop(self, "defer_to_flamenco_bat")
 
         layout.separator()
 
@@ -58,12 +81,7 @@ class BBP_AddonPreferences(AddonPreferences):
 
 def _on_default_output_path_update(prefs, context):
     """Sync scene paths and persist reload-safe sidecar."""
-    try:
-        from ..utils.prefs_sidecar import is_restoring, save_sidecar
-        if not is_restoring():
-            save_sidecar(prefs)
-    except Exception:
-        pass
+    _save_prefs_sidecar(prefs)
     _sync_default_output_path(prefs, context)
 
 

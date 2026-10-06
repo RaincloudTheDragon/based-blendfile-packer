@@ -21,11 +21,16 @@ _log = logging.getLogger(__name__)
 _WHEELS_DIR = Path(__file__).resolve().parent.parent / "wheels"
 
 
-def filename(module_name: str, *, filename_prefix: str = "") -> Path:
-    """Return the path of the wheel file for ``module_name`` (optional prefix)."""
+def filename(
+    module_name: str,
+    *,
+    filename_prefix: str = "",
+    wheels_dir: Path | None = None,
+) -> Path:
+    """Return the path of the wheel file for ``module_name`` (optional prefix / directory)."""
     if not filename_prefix:
         filename_prefix = _fname_prefix_from_module_name(module_name)
-    return _wheel_filename(filename_prefix)
+    return _wheel_filename(filename_prefix, wheels_dir=wheels_dir)
 
 
 def load_wheel(
@@ -33,12 +38,15 @@ def load_wheel(
     submodules: Iterable[str] = (),
     *,
     filename_prefix: str = "",
+    wheels_dir: Path | None = None,
 ) -> list[ModuleType]:
     """Import ``module_name`` (and optional submodules) from a matching ``*.whl``.
 
     All requested modules are loaded in one session so inter-submodule references resolve against the same wheel. Returns ``[toplevel, *submodules]``.
     """
-    wheel = filename(module_name, filename_prefix=filename_prefix)
+    wheel = filename(
+        module_name, filename_prefix=filename_prefix, wheels_dir=wheels_dir
+    )
     to_load = [module_name] + [f"{module_name}.{sub}" for sub in submodules]
     loaded: list[ModuleType] = []
 
@@ -76,16 +84,17 @@ def _sys_path_mod_backup(wheel_file: Path) -> Iterator[None]:
         sys.modules.update(old_sysmod)
 
 
-def _wheel_filename(fname_prefix: str) -> Path:
-    """Pick the newest wheel matching ``fname_prefix*.whl`` under ``wheels/``."""
+def _wheel_filename(fname_prefix: str, *, wheels_dir: Path | None = None) -> Path:
+    """Pick the newest wheel matching ``fname_prefix*.whl`` under ``wheels_dir`` (or BBP ``wheels/``)."""
+    root = Path(wheels_dir) if wheels_dir is not None else _WHEELS_DIR
     path_pattern = f"{fname_prefix}*.whl"
-    wheels = list(_WHEELS_DIR.glob(path_pattern))
-    if not wheels:
-        raise RuntimeError(f"Unable to find wheel at {_WHEELS_DIR / path_pattern}")
+    found = list(root.glob(path_pattern))
+    if not found:
+        raise RuntimeError(f"Unable to find wheel at {root / path_pattern}")
 
     # Prefer newest mtime when multiple matches exist (e.g. during local bumps).
-    wheels.sort(key=lambda path: path.stat().st_mtime)
-    return wheels[-1]
+    found.sort(key=lambda path: path.stat().st_mtime)
+    return found[-1]
 
 
 def _fname_prefix_from_module_name(module_name: str) -> str:

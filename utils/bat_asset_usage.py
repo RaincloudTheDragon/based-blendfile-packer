@@ -7,7 +7,7 @@ Supported Blender targets and BAT backends:
 - **4.5 LTS** — BAT v1 wheel (``blender_asset_tracer-1.*.whl``; standalone blend parsing).
 - **5.2 LTS** — BAT v2 wheel (``blender_asset_tracer-2.*.whl``; in-Blender ``file_usage`` API).
 
-Both wheels ship under ``wheels/`` and are loaded at runtime (Flamenco-style), not via ``blender_manifest.toml``, so the same package name can resolve to different versions.
+Both wheels ship under ``wheels/`` and are loaded at runtime (Flamenco-style), not via ``blender_manifest.toml``, so the same package name can resolve to different versions. When ``defer_to_flamenco_bat`` is on (default) and Flamenco is enabled, BBP loads BAT from Flamenco instead.
 
 Packed datablocks are filtered locally so their filepaths are not copied or treated as missing:
 
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import importlib
+import sys
 from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
@@ -81,24 +83,103 @@ def uses_bat_v1() -> bool:
     return not uses_bat_v2()
 
 
+def _defer_to_flamenco_bat() -> bool:
+    """True when the preference is on (default) so Flamenco owns BAT when present."""
+    from .compat import get_addon_prefs
+
+    prefs = get_addon_prefs()
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "defer_to_flamenco_bat", True))
+
+
+def _flamenco_root() -> Path | None:
+    """Return Flamenco's addon package directory when the classic ``flamenco`` add-on is available."""
+    mod = sys.modules.get("flamenco")
+    if mod is None:
+        try:
+            if "flamenco" not in bpy.context.preferences.addons:
+                return None
+        except Exception:
+            return None
+        try:
+            mod = importlib.import_module("flamenco")
+        except ImportError:
+            return None
+    file_path = getattr(mod, "__file__", None)
+    if not file_path:
+        return None
+    return Path(file_path).resolve().parent
+
+
+def _flamenco_wheels_dir() -> Path | None:
+    """Return Flamenco's ``wheels/`` dir when it contains BAT wheels."""
+    root = _flamenco_root()
+    if root is None:
+        return None
+    wheels_dir = root / "wheels"
+    if not wheels_dir.is_dir():
+        return None
+    if not any(wheels_dir.glob("blender_asset_tracer-*.whl")):
+        return None
+    return wheels_dir
+
+
+def _load_flamenco_v2_file_usage() -> ModuleType | None:
+    """Reuse Flamenco's BAT v2 ``file_usage`` so Flamenco owns the wheel load."""
+    if _flamenco_root() is None:
+        return None
+    try:
+        # Importing submodules triggers Flamenco's loader (sets BAT_WHEEL when needed).
+        submodules = importlib.import_module("flamenco.bat_v2.submodules")
+    except ImportError:
+        return None
+    file_usage = getattr(submodules, "file_usage", None)
+    if file_usage is None:
+        return None
+    return file_usage
+
+
+def _ensure_flamenco_v1_loaded() -> None:
+    """Import Flamenco's BAT v1 submodules so Flamenco owns the v1 wheel load first."""
+    if _flamenco_root() is None:
+        return
+    try:
+        importlib.import_module("flamenco.bat.submodules")
+    except ImportError:
+        pass
+
+
 def _bat_v1_trace() -> ModuleType:
-    """Return BAT v1 ``trace`` from the bundled ``blender_asset_tracer-1.*.whl``."""
+    """Return BAT v1 ``trace`` (Flamenco wheels when deferring, else BBP ``wheels/``)."""
     global _BAT_V1_TRACE
     if _BAT_V1_TRACE is None:
+        wheels_dir: Path | None = None
+        if _defer_to_flamenco_bat():
+            wheels_dir = _flamenco_wheels_dir()
+            if wheels_dir is not None:
+                # Let Flamenco bind its v1 modules first; we still need ``trace`` from the same wheel set.
+                _ensure_flamenco_v1_loaded()
         # Load toplevel + trace together so package-relative imports stay consistent.
         _toplevel, _BAT_V1_TRACE = wheels.load_wheel(
             "blender_asset_tracer",
             ("trace",),
             filename_prefix="blender_asset_tracer-1.",
+            wheels_dir=wheels_dir,
         )
         del _toplevel
     return _BAT_V1_TRACE
 
 
 def _bat_v2_file_usage() -> ModuleType:
-    """Return BAT v2 ``file_usage`` from the bundled ``blender_asset_tracer-2.*.whl``."""
+    """Return BAT v2 ``file_usage`` (Flamenco modules when deferring, else BBP ``wheels/``)."""
     global _BAT_V2_FILE_USAGE
     if _BAT_V2_FILE_USAGE is None:
+        if _defer_to_flamenco_bat():
+            flamenco_fu = _load_flamenco_v2_file_usage()
+            if flamenco_fu is not None:
+                _BAT_V2_FILE_USAGE = flamenco_fu
+                return _BAT_V2_FILE_USAGE
         _toplevel, _BAT_V2_FILE_USAGE = wheels.load_wheel(
             "blender_asset_tracer",
             ("file_usage",),

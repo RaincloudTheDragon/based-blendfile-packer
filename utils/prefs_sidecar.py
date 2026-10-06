@@ -40,6 +40,8 @@ def prefs_snapshot(prefs):
     return {
         "version": SIDECAR_VERSION,
         "default_output_path": str(prefs.default_output_path or ""),
+        # Default True when Flamenco coexistence is desired.
+        "defer_to_flamenco_bat": bool(getattr(prefs, "defer_to_flamenco_bat", True)),
     }
 
 
@@ -52,6 +54,8 @@ def apply_snapshot(data, prefs):
     try:
         if "default_output_path" in data:
             prefs.default_output_path = data.get("default_output_path") or ""
+        # Missing key → True (safe default for Flamenco sessions).
+        prefs.defer_to_flamenco_bat = bool(data.get("defer_to_flamenco_bat", True))
         return True
     finally:
         _restoring = False
