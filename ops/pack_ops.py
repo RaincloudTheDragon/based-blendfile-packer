@@ -42,7 +42,7 @@ def _unique_missing_names(missing: list) -> list[str]:
 
 
 def _log_missing_assets_summary(missing: list) -> str:
-    """Print Flamenco-style offline-files summary; return a short UI message (or "")."""
+    """Print Flamenco-style offline-files summary; return a UI message with basenames (or "")."""
     names = _unique_missing_names(missing)
     if not names:
         return ""
@@ -52,7 +52,8 @@ def _log_missing_assets_summary(missing: list) -> str:
     if len(names) > 30:
         print(f"[BBP Pack]   ... and {len(names) - 30} more")
     print("[BBP Pack] Review the list — remap or remove in source blends if needed.")
-    return f"{len(names)} missing/offline file(s) (see system console)"
+    # Operator report: one basename per line so the Info log stays scannable.
+    return f"{len(names)} missing/offline:\n" + "\n".join(names)
 
 
 class DeadUncAssetError(RuntimeError):
