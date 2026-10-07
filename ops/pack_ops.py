@@ -56,6 +56,25 @@ def _pack_debug(message: str) -> None:
     print(f"[BBP Pack] DEBUG: {message}")
 
 
+def _pack_indicator_from_dir(pack_dir: Optional[Path]) -> str:
+    """Token from temp pack dir name (``bbp_pack_<token>`` → ``<token>``)."""
+    if pack_dir is None:
+        return ""
+    name = Path(pack_dir).name
+    if name.startswith("bbp_pack_"):
+        return name[len("bbp_pack_"):]
+    return name
+
+
+def _unique_pack_output_path(output_dir: Path, stem: str, suffix: str, pack_dir: Optional[Path]) -> Path:
+    """Prefer ``stem.suffix``; on name conflict use ``stem_<pack_indicator>.suffix`` (same token as the tmp pack dir)."""
+    desired = Path(output_dir) / f"{stem}{suffix}"
+    if not desired.exists():
+        return desired
+    indicator = _pack_indicator_from_dir(pack_dir) or f"{os.getpid():x}{time.time_ns() & 0xFFFFFF:x}"
+    return Path(output_dir) / f"{stem}_{indicator}{suffix}"
+
+
 def _path_looks_udim(path: Path) -> bool:
     """True when path is a UDIM token path or a concrete .10xx tile filename."""
     name = path.name if path else ""
@@ -2878,37 +2897,21 @@ class BBP_OT_pack_zip(Operator):
                             exclude_av=exclude_av,
                         )
                         
-                        # Rename ZIP to use blend file name, with suffix only if there's a conflict. Extract blend file name
+                        # Prefer {blend}.zip; on conflict use {blend}_{pack_indicator}.zip (conflict vs output_dir; token from tmp pack dir).
                         if self._original_filepath:
                             blend_name = Path(self._original_filepath).stem
                         elif self._temp_blend_path:
                             blend_name = self._temp_blend_path.stem
                         else:
                             blend_name = "untitled"
-                        
-                        # Check if the desired ZIP name already exists in output directory
-                        desired_zip_name = f"{blend_name}.zip"
-                        desired_zip_path = self._output_dir / desired_zip_name
-                        
-                        if desired_zip_path.exists():
-                            # File conflict - add suffix with pack indicator. Extract pack indicator from temp directory name (e.g., "0t2v99gf" from "bbp_pack_0t2v99gf")
-                            pack_indicator = self._target_path.name
-                            if pack_indicator.startswith("bbp_pack_"):
-                                pack_indicator = pack_indicator[len("bbp_pack_"):]
-                            
-                            # Create new ZIP name with suffix: {blend_name}_{pack_indicator}.zip
-                            new_zip_name = f"{blend_name}_{pack_indicator}.zip"
-                        else:
-                            # No conflict - use simple name
-                            new_zip_name = desired_zip_name
-                        
-                        new_zip_path = self._zip_path.parent / new_zip_name
-                        
-                        # Rename the ZIP file
-                        if self._zip_path.exists():
-                            self._zip_path.rename(new_zip_path)
-                            self._zip_path = new_zip_path
-                            print(f"[BBP Pack] Renamed ZIP to: {new_zip_name}")
+                        final_name = _unique_pack_output_path(
+                            self._output_dir, blend_name, ".zip", self._target_path
+                        ).name
+                        staged_zip = self._zip_path.parent / final_name
+                        if self._zip_path.exists() and self._zip_path != staged_zip:
+                            self._zip_path.rename(staged_zip)
+                            self._zip_path = staged_zip
+                            print(f"[BBP Pack] Renamed ZIP to: {final_name}")
                         
                         pack_settings.pack_progress = 80.0
                         pack_settings.pack_status_message = "ZIP archive created"
@@ -3393,11 +3396,14 @@ class BBP_OT_pack_blend(Operator):
                     pack_settings.pack_status_message = "Saving blend file to output location..."
                     
                     try:
-                        # Ensure output directory exists
+                        # Name conflict: same random suffix as the tmp pack dir (bbp_pack_<token>).
+                        self._output_path = _unique_pack_output_path(
+                            self._output_path.parent,
+                            self._output_path.stem,
+                            self._output_path.suffix,
+                            self._target_path,
+                        )
                         self._output_path.parent.mkdir(parents=True, exist_ok=True)
-                        
-                        # Copy blend file to output location
-                        import shutil
                         shutil.copy2(self._blend_path, self._output_path)
                         
                         print(f"[BBP Pack] Saved blend file to: {self._output_path}")
@@ -3632,13 +3638,7 @@ class BBP_OT_pack_zip_sync(Operator):
         zip_path = target_path.parent / f"{target_path.name}.zip"
         exclude_av = bool(getattr(pack_settings, 'exclude_av', False))
         create_zip_from_directory(target_path, zip_path, cancel_check=lambda: False, exclude_av=exclude_av)
-        desired_zip_name = f"{blend_name}.zip"
-        desired_zip_path = output_dir / desired_zip_name
-        pack_indicator = target_path.name
-        if pack_indicator.startswith("bbp_pack_"):
-            pack_indicator = pack_indicator[len("bbp_pack_"):]
-        new_zip_name = f"{blend_name}_{pack_indicator}.zip" if desired_zip_path.exists() else desired_zip_name
-        final_zip_path = output_dir / new_zip_name
+        final_zip_path = _unique_pack_output_path(output_dir, blend_name, ".zip", target_path)
         output_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(zip_path), str(final_zip_path))
         if temp_blend_path.exists():
