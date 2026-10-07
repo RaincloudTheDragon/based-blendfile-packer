@@ -63,7 +63,6 @@ def _path_looks_udim(path: Path) -> bool:
     return "<UDIM>" in s.upper() or "<udim>" in s or bool(_UDIM_TILE_NAME_RE.search(name))
 
 
-
 def _udim_family_key(path: Path) -> Optional[str]:
     """Stem family for foo.1001.png / foo.<UDIM>.png; None when not UDIM-shaped."""
     name = path.name if path else ""
@@ -98,13 +97,19 @@ def _session_udim_families() -> set[str]:
 
 
 def _is_ignorable_missing_asset(path: Path) -> bool:
-    """False positives: BAT-only sparse/phantom UDIM tiles."""
+    """False positives: pack-linked/archive origin libs, and BAT-only sparse/phantom UDIM tiles."""
     try:
         p = Path(path)
     except Exception:
         return False
     if not p.name:
         return False
+    # Blender 5.0+ pack-linked origin .blend (any asset type) — bytes already in this file; path is only an origin marker.
+    try:
+        if au.path_is_embedded_library(p):
+            return True
+    except Exception:
+        pass
 
     fam = _udim_family_key(p)
     if fam is None:
@@ -134,7 +139,7 @@ def _is_ignorable_missing_asset(path: Path) -> bool:
 
 
 def _filter_ignorable_missing(missing: list) -> list:
-    """Drop sparse/phantom UDIM false positives from a missing-path list."""
+    """Drop pack-linked origin-lib / sparse-UDIM false positives from a missing-path list."""
     if not missing:
         return missing
     ignored_udim_fams: set[str] = set()
@@ -528,17 +533,33 @@ def _path_suffix_score(stale: Path, hit: Path) -> int:
 
 
 def _resolve_blender_datafiles_asset(stale: Path) -> Optional[Path]:
-    """Map stale Blender-install datafiles paths to the running Blender's DATAFILES tree."""
+    """Map stale Blender-install datafiles/assets paths to the running Blender's DATAFILES tree."""
     name = stale.name
-    if name != "geometry_nodes_essentials.blend":
+    if not name.lower().endswith(".blend"):
         return None
-    if "datafiles" not in str(stale).replace("\\", "/").lower():
+    parts = [p.lower() for p in Path(stale).parts]
+    if "datafiles" not in parts or "assets" not in parts:
         return None
     try:
         df = Path(bpy.utils.system_resource("DATAFILES"))
-        cand = df / "assets" / "nodes" / name
-        if cand.is_file():
-            return cand.resolve()
+        # Prefer the same relative layout under assets/ (nodes/, brushes/, …).
+        try:
+            idx = parts.index("assets")
+            rel = Path(*Path(stale).parts[idx + 1 :])
+            cand = df / "assets" / rel
+            if cand.is_file():
+                return cand.resolve()
+        except (ValueError, OSError):
+            pass
+        # Fallback: basename search one level under assets/*
+        assets = df / "assets"
+        if assets.is_dir():
+            for sub in assets.iterdir():
+                if not sub.is_dir():
+                    continue
+                cand = sub / name
+                if cand.is_file():
+                    return cand.resolve()
     except Exception:
         pass
     return None
@@ -1699,7 +1720,7 @@ class IncrementalPacker:
                         len(asset_usage.abspath.parts) >= 2 and asset_usage.abspath.parts[-2] == "bakes"
                     ):
                         continue
-                    # BAT phantom / sparse UDIM tiles — not real pack targets.
+                    # Pack-linked origin libs / BAT phantom UDIMs — not real pack targets.
                     if _is_ignorable_missing_asset(asset_usage.abspath):
                         _pack_diag(f"Skip copy (ignorable): {name}", verbose_only=True)
                         continue

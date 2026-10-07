@@ -43,6 +43,61 @@ def _lib_abs(lib) -> Path:
     return Path(bpy.path.abspath(lib.filepath))
 
 
+def _lib_is_embedded(lib) -> bool:
+    """True when library bytes already live in this .blend (packed_file / archive / archive parent).
+
+    Blender 5.0+ pack-linked assets (any ID type) use an ``is_archive`` child under a parent with ``archive_libraries``. The library filepath is only an origin marker and may be dead; data is not missing.
+    """
+    if lib is None:
+        return False
+    if getattr(lib, "packed_file", None) is not None:
+        return True
+    if getattr(lib, "is_archive", False):
+        return True
+    archives = getattr(lib, "archive_libraries", None)
+    try:
+        return bool(archives is not None and len(archives) > 0)
+    except Exception:
+        return False
+
+
+def _ensure_embedded_lib_packable_path(lib, blend_dir: Path, pack_root: Path, roots: list[Path]) -> str:
+    """Make pack-linked/archive origin paths pack_libraries-safe without treating them as missing assets.
+
+    ``pack_libraries()`` aborts the *entire* op on any absolute library filepath — including archive parents whose bytes already live in the .blend. Rebind/localize (or stub) so the path is blend-relative under pack_root.
+    Returns: 'ok' | 'rebound' | 'localized' | 'stubbed' | 'missing'
+    """
+    fp = lib.filepath or ""
+    if fp.startswith("//"):
+        try:
+            abs_path = _lib_abs(lib)
+            if _is_under(abs_path, pack_root) or abs_path.is_file():
+                return "ok"
+        except Exception:
+            pass
+    status = _ensure_packable_lib_path(lib, blend_dir, pack_root)
+    if status != "missing":
+        return status
+    # Dead origin marker: find a real twin, else write a tiny stub under pack_root/_bbp_linked.
+    name = _blend_basename(Path(fp).name or lib.name) or "embedded_lib.blend"
+    found = _find_lib_by_basename(name, roots)
+    if found is not None:
+        _rebind_library(lib, found)
+        return _ensure_packable_lib_path(lib, blend_dir, pack_root)
+    stub = pack_root / "_bbp_linked" / name
+    try:
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        if not stub.is_file():
+            # Placeholder so filepath can be blend-relative; archive child holds the real packed IDs.
+            stub.write_bytes(b"BBP_PACK_LINKED_ORIGIN_STUB\n")
+            print(f"  Stub pack-linked origin path: {stub}")
+        _rebind_library(lib, stub)
+        return "stubbed"
+    except OSError as e:
+        print(f"  ERROR stubbing pack-linked origin for {lib.name}: {e}")
+        return "missing"
+
+
 def _ensure_packable_lib_path(lib, blend_dir: Path, pack_root: Path) -> str:
     """Make library path pack_libraries-safe. Prefer rebind-in-place under pack_root; copy only to pack_root/_bbp_linked.
 
@@ -339,8 +394,10 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
         if lib is None:
             print(f"  Library (gone during prepare): {lib_name}")
             continue
-        if getattr(lib, "packed_file", None):
-            print(f"  Library (already packed): {lib_name}")
+        if _lib_is_embedded(lib):
+            # Still must be blend-relative — absolute archive-origin paths abort pack_libraries for *all* libs.
+            estatus = _ensure_embedded_lib_packable_path(lib, blend_dir, pack_root, uniq_roots)
+            print(f"  Library (embedded, path {estatus}): {lib_name}")
             continue
         try:
             abs_path = _lib_abs(lib)
@@ -433,13 +490,22 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
 
     def _seal_unpacked_libraries() -> list[str]:
         """Recover/localize any still-unpacked libs and retry pack_libraries. Returns names still unpacked."""
-        still_names = [lib.name for lib in bpy.data.libraries if not getattr(lib, "packed_file", None)]
+        # Always sanitize absolute pack-linked origins first — one absolute path aborts pack_libraries entirely.
+        for lib_name in [lib.name for lib in bpy.data.libraries]:
+            lib = bpy.data.libraries.get(lib_name)
+            if lib is None:
+                continue
+            if _lib_is_embedded(lib):
+                _ensure_embedded_lib_packable_path(lib, blend_dir, pack_root, uniq_roots)
+        still_names = [lib.name for lib in bpy.data.libraries if not _lib_is_embedded(lib)]
         if not still_names:
-            return []
+            # Embedded-only: still retry pack_libraries in case paths were just made relative.
+            _do_pack_libraries()
+            return [lib.name for lib in bpy.data.libraries if not _lib_is_embedded(lib)]
         print(f"Seal pass: {len(still_names)} unpacked libraries — recover/localize then retry pack_libraries")
         for lib_name in still_names:
             lib = bpy.data.libraries.get(lib_name)
-            if lib is None:
+            if lib is None or _lib_is_embedded(lib):
                 continue
             try:
                 abs_path = _lib_abs(lib)
@@ -464,7 +530,7 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
         _do_pack_libraries()
         left = []
         for lib in bpy.data.libraries:
-            if not getattr(lib, "packed_file", None):
+            if not _lib_is_embedded(lib):
                 left.append(lib.name)
                 print(f"UNPACKED_LIB: {lib.name} | fp={lib.filepath}")
         return left
@@ -531,11 +597,11 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
             coll = getattr(bpy.data, coll_name, None)
             if coll is None:
                 continue
-            # Index healthy packed twins: basename -> {id_name -> block}
+            # Index healthy packed/embedded twins: basename -> {id_name -> block}
             twins: dict[str, dict[str, object]] = {}
             for block in coll:
                 lib = getattr(block, "library", None)
-                if lib is None or not getattr(lib, "packed_file", None):
+                if lib is None or not _lib_is_embedded(lib):
                     continue
                 if getattr(block, "is_missing", False):
                     continue
@@ -563,7 +629,10 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
         print("Retry: ensuring packable paths into pack_root/_bbp_linked/")
         for lib_name in [lib.name for lib in bpy.data.libraries]:
             lib = bpy.data.libraries.get(lib_name)
-            if lib is None or getattr(lib, "packed_file", None):
+            if lib is None:
+                continue
+            if _lib_is_embedded(lib):
+                _ensure_embedded_lib_packable_path(lib, blend_dir, pack_root, uniq_roots)
                 continue
             _ensure_packable_lib_path(lib, blend_dir, pack_root)
         try:
@@ -582,8 +651,7 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
 
     print("Libraries after pack:", len(bpy.data.libraries))
     for lib in bpy.data.libraries:
-        is_packed = bool(getattr(lib, "packed_file", None))
-        print(f"  - {lib.name}: packed={is_packed} fp={lib.filepath}")
+        print(f"  - {lib.name}: embedded={_lib_is_embedded(lib)} packed_file={bool(getattr(lib, 'packed_file', None))} archive={bool(getattr(lib, 'is_archive', False))} fp={lib.filepath}")
 
     try:
         print("Running pack_all() to ensure all data is packed...")
@@ -601,7 +669,7 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
     # Final honesty check — ghost Lib.blend.004 stays unpacked / is_missing even when twins are packed.
     unpacked_after = []
     for lib in bpy.data.libraries:
-        if getattr(lib, "packed_file", None):
+        if _lib_is_embedded(lib):
             continue
         unpacked_after.append(lib.name)
         print(f"UNPACKED_LIB: {lib.name} | fp={lib.filepath}")
@@ -614,7 +682,7 @@ def run_pack_linked(max_size_bytes: int, pack_root: Path | None = None, search_r
             print(f"MISSING_FILE: {lib.name} | fp={lib.filepath}")
     missing_ids = _collect_missing_ids()
 
-    packed_n = sum(1 for lib in bpy.data.libraries if getattr(lib, "packed_file", None))
+    packed_n = sum(1 for lib in bpy.data.libraries if _lib_is_embedded(lib))
     print(
         f"=== Pack Linked Complete (packed_libs={packed_n}, "
         f"unpacked_left={len(unpacked_after)}, unpacked_texts={len(unpacked_texts)}, "

@@ -12,9 +12,9 @@ Both wheels ship under ``wheels/`` and are loaded at runtime (Flamenco-style), n
 Packed datablocks are filtered locally so their filepaths are not copied or treated as missing:
 
 - Classic ``packed_file`` (images/fonts/libs/…).
-- Blender 5.0+ packed-linked IDs (``ID.is_linked_packed``) stored in archive libraries (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon; source path may be dead while data lives in the current .blend.
+- Blender 5.0+ pack-linked IDs (``ID.is_linked_packed``) stored in archive libraries (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon. Any ID type can be pack-linked (node groups, materials, objects, …); the library filepath is only an origin marker and may be dead while data lives in this .blend. ``report_missing_files`` / ``file_path_foreach`` still emit those paths (same class of false positive as for Essentials).
 
-Workaround until BAT v2 skips these in tracing (open upstream PR).
+Workaround until BAT/core skip pack-linked origin paths in tracing and missing-file reports.
 """
 
 from __future__ import annotations
@@ -240,13 +240,13 @@ def _library_for_blend_path(blend_path: Path) -> Library | None:
 def _library_is_packed(lib: Library | None) -> bool:
     """True when a library's data is already stored in the current .blend.
 
-    Covers classic ``packed_file`` and Blender 5.0+ packed-linked archive libs (``is_archive`` / parent with ``archive_libraries``). Archive parents keep a stale source filepath even though IDs live in the archive child.
+    Covers classic ``packed_file`` and Blender 5.0+ pack-linked archive libs (``is_archive`` / parent with ``archive_libraries``). Archive parents keep a stale origin filepath even though pack-linked IDs live in the archive child.
     """
     if lib is None:
         return False
     if getattr(lib, "packed_file", None) is not None:
         return True
-    # Blender 5.0+: archive storage for Pack Linked Libraries
+    # Blender 5.0+: archive storage for pack-linked assets (any ID type)
     if getattr(lib, "is_archive", False):
         return True
     archives = getattr(lib, "archive_libraries", None)
@@ -254,13 +254,38 @@ def _library_is_packed(lib: Library | None) -> bool:
         if archives is not None and len(archives) > 0:
             return True
     except Exception:
-        pass
+        return False
     return False
 
 
 def _id_is_linked_packed(item) -> bool:
-    """True when an ID is linked-but-packed into this .blend (Blender 5.0+)."""
+    """True when an ID is pack-linked into this .blend (Blender 5.0+ ``is_linked_packed``)."""
     return bool(getattr(item, "is_linked_packed", False))
+
+
+def _iter_pack_linked_ids():
+    """Yield every pack-linked ID in the session (any datablock type)."""
+    try:
+        # user_map keys are all IDs that participate in the dependency graph.
+        for item in bpy.data.user_map():
+            if _id_is_linked_packed(item):
+                yield item
+    except Exception:
+        return
+
+
+def _blend_basename(name: str) -> str:
+    """Normalize ``foo.blend.001`` / path / datablock name to ``foo.blend``."""
+    if not name:
+        return ""
+    base = Path(name).name
+    lower = base.lower()
+    if lower.endswith(".blend"):
+        return base
+    idx = lower.rfind(".blend")
+    if idx >= 0:
+        return base[: idx + len(".blend")]
+    return base
 
 
 def _path_variants(filepath: str) -> set[Path]:
@@ -283,11 +308,53 @@ def _path_variants(filepath: str) -> set[Path]:
     return variants
 
 
-def _packed_external_paths() -> set[Path]:
-    """Resolved filepaths belonging to packed / packed-linked datablocks.
+def _embedded_library_index() -> tuple[set[Path], set[str]]:
+    """Paths + basenames for libraries whose bytes already live in this .blend.
 
-    Local workaround: BAT v2 still reports these paths; they must not be treated as external copy/missing targets.
+    BAT often attributes pack-linked .blend origin paths to ``lib=None`` with a dead filepath. Exact path match is brittle; basename match against session archive / pack-linked libs is the reliable signal.
     """
+    paths: set[Path] = set()
+    names: set[str] = set()
+
+    def _record_lib(lib) -> None:
+        if lib is None:
+            return
+        fp = getattr(lib, "filepath", None) or ""
+        paths.update(_path_variants(fp))
+        base = _blend_basename(fp or getattr(lib, "name", "") or "").lower()
+        if base:
+            names.add(base)
+
+    for lib in bpy.data.libraries:
+        if _library_is_packed(lib):
+            _record_lib(lib)
+    # Any pack-linked ID (materials, objects, node groups, …) records its origin library path.
+    for item in _iter_pack_linked_ids():
+        _record_lib(getattr(item, "library", None))
+    return paths, names
+
+
+def path_is_embedded_library(path: Path | str) -> bool:
+    """True when *path* is a .blend already stored via packed_file / archive / pack-linked."""
+    try:
+        p = Path(path)
+    except Exception:
+        return False
+    name = _blend_basename(p.name).lower()
+    if not name.endswith(".blend"):
+        return False
+    paths, names = _embedded_library_index()
+    if name in names:
+        return True
+    try:
+        resolved = p.resolve()
+    except (OSError, RuntimeError, ValueError):
+        resolved = p
+    return p in paths or resolved in paths
+
+
+def _packed_nonlibrary_paths() -> set[Path]:
+    """Resolved filepaths of packed / pack-linked non-library datablocks (images, fonts, …)."""
     packed: set[Path] = set()
     collections = [
         bpy.data.images,
@@ -295,9 +362,7 @@ def _packed_external_paths() -> set[Path]:
         bpy.data.sounds,
         getattr(bpy.data, "movieclips", []),
         getattr(bpy.data, "volumes", []),
-        bpy.data.libraries,
         bpy.data.texts,
-        bpy.data.node_groups,
     ]
     for coll in collections:
         try:
@@ -306,25 +371,29 @@ def _packed_external_paths() -> set[Path]:
             continue
         for item in items:
             has_packed_file = getattr(item, "packed_file", None) is not None
-            linked_packed = _id_is_linked_packed(item)
-            is_embedded_lib = isinstance(item, Library) and _library_is_packed(item)
-            if not (has_packed_file or linked_packed or is_embedded_lib):
+            if not (has_packed_file or _id_is_linked_packed(item)):
                 continue
             filepath = getattr(item, "filepath", None) or ""
-            # Linked-packed IDs often inherit filepath via their library
             if not filepath and getattr(item, "library", None) is not None:
                 filepath = getattr(item.library, "filepath", None) or ""
             packed.update(_path_variants(filepath))
+    # Pack-linked IDs of any type may still expose a library origin path via file_path_foreach.
+    for item in _iter_pack_linked_ids():
+        lib = getattr(item, "library", None)
+        if lib is not None:
+            packed.update(_path_variants(getattr(lib, "filepath", None) or ""))
+        fp = getattr(item, "filepath", None) or ""
+        if fp:
+            packed.update(_path_variants(fp))
     return packed
 
 
 def _filter_packed_usages(
     usages: dict[Library | None, set[AssetUsage]],
 ) -> dict[Library | None, set[AssetUsage]]:
-    """Drop usages whose abspath matches a packed / packed-linked datablock filepath."""
-    packed = _packed_external_paths()
-    if not packed:
-        return usages
+    """Drop usages whose abspath matches a packed / pack-linked / archive library."""
+    embedded_paths, embedded_names = _embedded_library_index()
+    packed_assets = _packed_nonlibrary_paths()
 
     filtered: dict[Library | None, set[AssetUsage]] = defaultdict(set)
     skipped = 0
@@ -335,16 +404,24 @@ def _filter_packed_usages(
             continue
         for item in items:
             path = item.abspath
+            base = _blend_basename(path.name).lower()
+            # Pack-linked origin .blend: BAT often lists these under lib=None with a dead source path.
+            if base.endswith(".blend") and base in embedded_names:
+                skipped += 1
+                continue
             try:
                 resolved = path.resolve()
             except (OSError, RuntimeError, ValueError):
                 resolved = path
-            if path in packed or resolved in packed:
+            if path in embedded_paths or resolved in embedded_paths:
+                skipped += 1
+                continue
+            if path in packed_assets or resolved in packed_assets:
                 skipped += 1
                 continue
             filtered[lib].add(item)
     if skipped:
-        print(f"[BBP BAT] Skipped {skipped} packed/packed-linked path(s) (not traced as external)")
+        print(f"[BBP BAT] Skipped {skipped} packed/pack-linked path(s) (not traced as external)")
     return dict(filtered)
 
 
@@ -403,7 +480,7 @@ def _v1_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
     """Discover non-blend assets with BAT v1 file tracing (4.5 LTS path)."""
     bat_trace = _bat_v1_trace()
     usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
-    packed = _packed_external_paths()
+    packed = _packed_nonlibrary_paths()
 
     for lib, blend_path in _iter_session_blend_paths():
         if not blend_path.exists() or blend_path.suffix.lower() != ".blend":
@@ -453,17 +530,17 @@ def find_blend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
 
     for _id, id_users in bpy.data.user_map().items():
         id_lib = _id.library
-        # Blender 5.0+ packed-linked IDs are already stored in this .blend (archive libs).
+        # Pack-linked IDs are already stored in this .blend (archive libs).
         if _id_is_linked_packed(_id):
             continue
-        # Packed library datablocks / archive storage — don't require their filepath.
+        # Packed / archive library datablocks — don't require their origin filepath.
         if _library_is_packed(id_lib):
             continue
         libs_deps.setdefault(id_lib, set())
         for id_user in id_users:
             if id_user.library == id_lib:
                 continue
-            # Skip when the referencing blend is itself a packed/archive library.
+            # Skip when the referencing blend is itself packed/archive.
             if _library_is_packed(id_user.library):
                 continue
 

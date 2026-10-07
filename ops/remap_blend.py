@@ -59,12 +59,27 @@ def recover_stale_light(stale: Path, search_roots: list[Path]) -> Path | None:
         pass
 
     name = stale_p.name
-    if name == "geometry_nodes_essentials.blend" and "datafiles" in str(stale_p).replace("\\", "/").lower():
+    # Stale Blender-install datafiles/assets path → running Blender's DATAFILES tree.
+    parts_l = [p.lower() for p in stale_p.parts]
+    if name.lower().endswith(".blend") and "datafiles" in parts_l and "assets" in parts_l:
         try:
-            cand = Path(bpy.utils.system_resource("DATAFILES")) / "assets" / "nodes" / name
-            if cand.is_file():
-                print("    Recovered stale path:", stale_p, "->", cand)
-                return cand.resolve()
+            df = Path(bpy.utils.system_resource("DATAFILES"))
+            try:
+                idx = parts_l.index("assets")
+                cand = df / "assets" / Path(*stale_p.parts[idx + 1 :])
+                if cand.is_file():
+                    print("    Recovered stale path:", stale_p, "->", cand)
+                    return cand.resolve()
+            except (ValueError, OSError):
+                pass
+            assets = df / "assets"
+            if assets.is_dir():
+                for sub in assets.iterdir():
+                    if sub.is_dir():
+                        cand = sub / name
+                        if cand.is_file():
+                            print("    Recovered stale path:", stale_p, "->", cand)
+                            return cand.resolve()
         except Exception:
             pass
 
