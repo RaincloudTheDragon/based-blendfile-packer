@@ -56,6 +56,28 @@ def _pack_debug(message: str) -> None:
     print(f"[BBP Pack] DEBUG: {message}")
 
 
+def _format_pack_duration(seconds: float) -> str:
+    """Human-readable duration for pack timing logs / operator reports."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60.0)
+    if m < 60:
+        return f"{int(m)}m {s:.1f}s"
+    h, m = divmod(int(m), 60)
+    return f"{h}h {m}m {s:.0f}s"
+
+
+def _report_pack_duration(t0: Optional[float], *, cancelled: bool = False) -> str:
+    """Print total pack wall time; return the short duration string (or empty if no start)."""
+    if t0 is None:
+        return ""
+    elapsed = time.perf_counter() - t0
+    dur = _format_pack_duration(elapsed)
+    label = "cancelled" if cancelled else "finished"
+    print(f"[BBP Pack] Pack {label} in {dur} ({elapsed:.2f}s)")
+    return dur
+
+
 def _pack_indicator_from_dir(pack_dir: Optional[Path]) -> str:
     """Token from temp pack dir name (``bbp_pack_<token>`` → ``<token>``)."""
     if pack_dir is None:
@@ -2640,6 +2662,7 @@ class BBP_OT_pack_zip(Operator):
         self._message = ""
         self._error = None
         self._packer = None  # IncrementalPacker instance
+        self._pack_t0 = time.perf_counter()  # End-to-end wall clock (invoke → finish/cancel)
         # OS taskbar via ITaskbarList3 (Atomic wm_progress pattern)
         wm_progress.begin()
         wm_progress.set_progress(0.0)
@@ -2672,7 +2695,8 @@ class BBP_OT_pack_zip(Operator):
         if event.type == 'ESC' or pack_settings.cancel_requested:
             _pack_debug(f"Cancel requested, cancelling")
             self._cleanup(context, cancelled=True)
-            self.report({'INFO'}, "Packing cancelled.")
+            dur = getattr(self, "_pack_duration", "") or ""
+            self.report({'INFO'}, f"Packing cancelled ({dur})." if dur else "Packing cancelled.")
             return {'CANCELLED'}
         
         # Handle timer events
@@ -2829,7 +2853,8 @@ class BBP_OT_pack_zip(Operator):
                     except InterruptedError as e:
                         _pack_debug(f"Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
-                        self.report({'INFO'}, "Packing cancelled.")
+                        dur = getattr(self, "_pack_duration", "") or ""
+                        self.report({'INFO'}, f"Packing cancelled ({dur})." if dur else "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
                         _pack_debug(f"ERROR in PACKING: {type(e).__name__}: {str(e)}")
@@ -2995,7 +3020,8 @@ class BBP_OT_pack_zip(Operator):
                     except InterruptedError as e:
                         _pack_debug(f"ZIP creation cancelled by user")
                         self._cleanup(context, cancelled=True)
-                        self.report({'INFO'}, "ZIP creation cancelled.")
+                        dur = getattr(self, "_pack_duration", "") or ""
+                        self.report({'INFO'}, f"ZIP creation cancelled ({dur})." if dur else "ZIP creation cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
                         _pack_debug(f"ERROR creating ZIP: {type(e).__name__}: {str(e)}")
@@ -3096,16 +3122,19 @@ class BBP_OT_pack_zip(Operator):
                     pack_settings.pack_progress = 100.0
                     wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    dur = _report_pack_duration(getattr(self, "_pack_t0", None))
+                    done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
                     pack_settings.pack_status_message = (
-                        f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
+                        f"{done_msg.rstrip('!')} — {missing_summary}" if missing_summary else done_msg
                     )
                     
                     # Small delay to show completion
-                    import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
                     saved_msg = self._message if self._message else f"File saved to: {self._output_path}"
+                    if dur:
+                        saved_msg = f"{saved_msg} ({dur})"
                     self.report({'INFO'}, saved_msg)
                     if missing_summary:
                         self.report({'WARNING'}, missing_summary)
@@ -3125,6 +3154,10 @@ class BBP_OT_pack_zip(Operator):
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
         pack_settings = context.scene.bbp_pack
+        # One cancel/error timing report per run (clear t0 so cleanup can't double-print).
+        if cancelled and getattr(self, "_pack_t0", None) is not None:
+            self._pack_duration = _report_pack_duration(self._pack_t0, cancelled=True)
+            self._pack_t0 = None
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
@@ -3219,6 +3252,7 @@ class BBP_OT_pack_blend(Operator):
         self._message = ""
         self._error = None
         self._packer = None  # IncrementalPacker instance
+        self._pack_t0 = time.perf_counter()  # End-to-end wall clock (invoke → finish/cancel)
         # OS taskbar via ITaskbarList3 (Atomic wm_progress pattern)
         wm_progress.begin()
         wm_progress.set_progress(0.0)
@@ -3246,7 +3280,8 @@ class BBP_OT_pack_blend(Operator):
         # Handle Esc / Cancel button
         if event.type == 'ESC' or pack_settings.cancel_requested:
             self._cleanup(context, cancelled=True)
-            self.report({'INFO'}, "Packing cancelled.")
+            dur = getattr(self, "_pack_duration", "") or ""
+            self.report({'INFO'}, f"Packing cancelled ({dur})." if dur else "Packing cancelled.")
             return {'CANCELLED'}
         
         # Handle timer events
@@ -3391,7 +3426,8 @@ class BBP_OT_pack_blend(Operator):
                     except InterruptedError as e:
                         _pack_debug(f"Packing cancelled by user")
                         self._cleanup(context, cancelled=True)
-                        self.report({'INFO'}, "Packing cancelled.")
+                        dur = getattr(self, "_pack_duration", "") or ""
+                        self.report({'INFO'}, f"Packing cancelled ({dur})." if dur else "Packing cancelled.")
                         return {'CANCELLED'}
                     except Exception as e:
                         _pack_debug(f"ERROR in PACKING: {type(e).__name__}: {str(e)}")
@@ -3520,16 +3556,19 @@ class BBP_OT_pack_blend(Operator):
                     pack_settings.pack_progress = 100.0
                     wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    dur = _report_pack_duration(getattr(self, "_pack_t0", None))
+                    done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
                     pack_settings.pack_status_message = (
-                        f"Packing complete — {missing_summary}" if missing_summary else "Packing complete!"
+                        f"{done_msg.rstrip('!')} — {missing_summary}" if missing_summary else done_msg
                     )
                     
                     # Small delay to show completion
-                    import time
                     time.sleep(0.2)
                     
                     self._cleanup(context, cancelled=False)
                     saved_msg = self._message if self._message else f"File saved to: {self._output_path}"
+                    if dur:
+                        saved_msg = f"{saved_msg} ({dur})"
                     self.report({'INFO'}, saved_msg)
                     if missing_summary:
                         self.report({'WARNING'}, missing_summary)
@@ -3549,6 +3588,10 @@ class BBP_OT_pack_blend(Operator):
     def _cleanup(self, context, cancelled=False):
         """Clean up progress properties and timer."""
         pack_settings = context.scene.bbp_pack
+        # One cancel/error timing report per run (clear t0 so cleanup can't double-print).
+        if cancelled and getattr(self, "_pack_t0", None) is not None:
+            self._pack_duration = _report_pack_duration(self._pack_t0, cancelled=True)
+            self._pack_t0 = None
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
