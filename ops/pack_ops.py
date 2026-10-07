@@ -1523,66 +1523,10 @@ def pack_linked_in_blend(
     return missing_files, oversized_files
 
 
-def enable_nla_in_blend(blend_path: Path, autopack_on_save: bool = True) -> None:
-    """Open a blend and ensure NLA tracks/strips are enabled and unmuted."""
-    autopack_block = ""
-    if autopack_on_save:
-        autopack_block = (
-            "try:\n"
-            "    fp = bpy.context.preferences.filepaths\n"
-            "    for k in ('use_autopack', 'use_autopack_files', 'use_auto_pack'):\n"
-            "        if hasattr(fp, k):\n"
-            "            try:\n"
-            "                setattr(fp, k, True)\n"
-            "            except Exception:\n"
-            "                pass\n"
-            "except Exception:\n"
-            "    pass\n"
-        )
-    
-    script = (
-        "import bpy\n"
-        "for obj in bpy.data.objects:\n"
-        "    ad = getattr(obj, 'animation_data', None)\n"
-        "    if not ad:\n"
-        "        continue\n"
-        "    if hasattr(ad, 'use_nla') and not getattr(ad, 'use_nla', True):\n"
-        "        try:\n"
-        "            ad.use_nla = True\n"
-        "        except Exception:\n"
-        "            pass\n"
-        "    tracks = getattr(ad, 'nla_tracks', None)\n"
-        "    if not tracks:\n"
-        "        continue\n"
-        "    for tr in tracks:\n"
-        "        try:\n"
-        "            if hasattr(tr, 'lock') and tr.lock:\n"
-        "                tr.lock = False\n"
-        "            tr.mute = False\n"
-        "            if hasattr(tr, 'is_solo') and tr.is_solo:\n"
-        "                tr.is_solo = False\n"
-        "            for st in getattr(tr, 'strips', []):\n"
-        "                try:\n"
-        "                    if hasattr(st, 'mute') and st.mute:\n"
-        "                        st.mute = False\n"
-        "                    if hasattr(st, 'use_animated_influence') and hasattr(st, 'influence'):\n"
-        "                        if (not getattr(st, 'use_animated_influence')) and float(getattr(st, 'influence', 1.0)) == 0.0:\n"
-        "                            st.influence = 1.0\n"
-        "                except Exception:\n"
-        "                    pass\n"
-        "        except Exception:\n"
-        "            pass\n"
-        f"{autopack_block}"
-        "bpy.ops.wm.save_mainfile(compress=True)\n"
-    )
-    
-    _run_blender_script(script, blend_path)
-
-
 class IncrementalPacker:
     """Stateful incremental packer that processes files in batches across multiple timer events."""
     
-    def __init__(self, workflow: str, target_path: Optional[Path], enable_nla: bool, 
+    def __init__(self, workflow: str, target_path: Optional[Path],
                  progress_callback=None, cancel_check=None,
                  frame_start=None, frame_end=None, frame_step=None,
                  temp_blend_path: Optional[Path] = None,
@@ -1591,7 +1535,6 @@ class IncrementalPacker:
                  exclude_av: bool = False):
         self.workflow = workflow
         self.target_path = target_path
-        self.enable_nla = enable_nla
         self.progress_callback = progress_callback
         self.cancel_check = cancel_check
         self.frame_start = frame_start  # For cache truncation
@@ -1633,7 +1576,6 @@ class IncrementalPacker:
         # Blend processing state
         self.blend_deps = None
         self.to_remap = []
-        self.nla_index = 0
         self.remap_index = 0
         self.pack_all_index = 0
         self.pack_linked_index = 0
@@ -2051,32 +1993,6 @@ class IncrementalPacker:
                 print(f"[BBP Pack]   Blend to process: {label}")
             print(f"[BBP Pack] Found {len(self.to_remap)} blend files to process (full pack tree)")
             _pack_diag(f"BAT blend_deps groups: {len(self.blend_deps)}; pack-tree blends: {len(self.to_remap)}")
-            self.nla_index = 0
-            self.phase = 'ENABLE_NLA' if self.enable_nla else 'REMAP_PATHS'
-            return (self.phase, False)
-        
-        elif self.phase == 'ENABLE_NLA':
-            if self.nla_index == 0:
-                print(f"[BBP Pack] Enabling NLA tracks in blend files...")
-                self._progress(50.0, "Enabling NLA tracks...")
-            units_this_tick = 0
-            while self.nla_index < len(self.to_remap) and units_this_tick < batch_size:
-                if self.cancel_check and self.cancel_check():
-                    raise InterruptedError("Packing cancelled by user")
-                blend_to_fix = self.to_remap[self.nla_index]
-                t0 = time.perf_counter()
-                if blend_to_fix.exists():
-                    progress_pct = 50.0 + ((self.nla_index + 1) / len(self.to_remap) * 5.0) if self.to_remap else 50.0
-                    self._progress(progress_pct, f"Enabling NLA in blend files... ({self.nla_index + 1}/{len(self.to_remap)})")
-                    print(f"[BBP Pack]   [{self.nla_index + 1}/{len(self.to_remap)}] Enabling NLA in: {blend_to_fix.name}")
-                    enable_nla_in_blend(blend_to_fix, autopack_on_save=self.autopack_on_save)
-                self.nla_index += 1
-                units_this_tick += 1
-                if self._unit_took_too_long("nla", blend_to_fix.name, t0):
-                    break
-            if self.nla_index < len(self.to_remap):
-                return ('ENABLE_NLA', False)
-            print(f"[BBP Pack] Finished enabling NLA")
             self.remap_index = 0
             self.phase = 'REMAP_PATHS'
             return ('REMAP_PATHS', False)
@@ -2275,7 +2191,7 @@ class IncrementalPacker:
         return (self.phase, False)
 
 
-def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: bool = True, 
+def pack_project(workflow: str, target_path: Optional[Path] = None,
                  progress_callback=None, cancel_check=None) -> Tuple[Path, Optional[Path]]:
     """
     Main packing function.
@@ -2283,14 +2199,13 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     Args:
         workflow: Either 'copy-only' or 'pack-and-save'
         target_path: Target directory (if None, uses temp directory)
-        enable_nla: Whether to enable NLA tracks
 
     Returns:
         Tuple of (target_path: Path, file_path: Optional[Path])
         - target_path: Path to the packed output directory
         - file_path: Path to the file to submit (ZIP for copy-only, blend for pack-and-save)
     """
-    print(f"[BBP Pack] Starting pack process: workflow={workflow}, enable_nla={enable_nla}")
+    print(f"[BBP Pack] Starting pack process: workflow={workflow}")
     
     if target_path is None:
         target_path = Path(tempfile.mkdtemp(prefix="bbp_pack_"))
@@ -2523,22 +2438,6 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     blend_deps = au.find_blend_asset_usage()
     to_remap = _collect_pack_tree_blends(target_path, top_level_target_blend, copy_map)
     print(f"[BBP Pack] Found {len(to_remap)} blend files to process (full pack tree; BAT groups={len(blend_deps)})")
-    
-    # Enable NLA before packing
-    if enable_nla:
-        print(f"[BBP Pack] Enabling NLA tracks in blend files...")
-        if progress_callback:
-            progress_callback(50.0, "Enabling NLA tracks...")
-        for i, blend_to_fix in enumerate(to_remap, 1):
-            if cancel_check and cancel_check():
-                raise InterruptedError("Packing cancelled by user")
-            if blend_to_fix.exists():
-                progress_pct = 50.0 + (i / len(to_remap) * 5.0) if to_remap else 50.0
-                if progress_callback:
-                    progress_callback(progress_pct, f"Enabling NLA in blend files... ({i}/{len(to_remap)})")
-                print(f"[BBP Pack]   [{i}/{len(to_remap)}] Enabling NLA in: {blend_to_fix.name}")
-                enable_nla_in_blend(blend_to_fix, autopack_on_save=autopack_on_save)
-        print(f"[BBP Pack] Finished enabling NLA")
     
     # Remap library paths
     print(f"[BBP Pack] Remapping library paths in blend files...")
@@ -2845,7 +2744,6 @@ class BBP_OT_pack_zip(Operator):
                     self._packer = IncrementalPacker(
                         WorkflowMode.COPY_ONLY,
                         target_path=None,
-                        enable_nla=False,
                         progress_callback=progress_callback,
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
@@ -3413,7 +3311,6 @@ class BBP_OT_pack_blend(Operator):
                     self._packer = IncrementalPacker(
                         WorkflowMode.PACK_AND_SAVE,
                         target_path=None,
-                        enable_nla=False,
                         progress_callback=progress_callback,
                         cancel_check=cancel_check,
                         frame_start=self._frame_start,
@@ -3774,7 +3671,6 @@ class BBP_OT_pack_zip_sync(Operator):
         packer = IncrementalPacker(
             WorkflowMode.COPY_ONLY,
             target_path=None,
-            enable_nla=False,
             progress_callback=_progress,
             cancel_check=lambda: False,
             frame_start=frame_start,
