@@ -1,3 +1,36 @@
+## [v0.3.0] - 2026-10-07
+
+### Features
+
+- Jump-to-prefs button in the UI.
+- Prefs toggle to defer to Flamenco’s bundled BAT wheels.
+- Verbose pack debug toggle.
+- Blend pack: pack-token suffix on output name conflict.
+- Report pack duration.
+- More responsive pack modal (Atomic-style hang-threshold yields).
+- Fonts copied and remapped (including Windows Fonts / linked VFonts).
+
+### Fixes
+
+- ZIP: sanitize unsupported special characters in paths.
+- Log missing files on subsequent pack runs.
+- Stale-path recovery; Blender remap/pack scripts moved to external entrypoints.
+- Restore full recursive blend pack.
+- Heal nested lib-path ghosts; report missing linked IDs.
+- Ignore sparse/phantom UDIM tiles in missing reports.
+- Account for pack-linked/archive libraries.
+- ZIP: only existing blendcache dirs targeted by hero sims.
+- ZIP no longer runs `pack_linked` (libraries stay external).
+- Copy paths still needed on disk even when packed in another library.
+
+### Internal/Dev
+
+- BAT v2 → 2.2.0.
+- Ship and choose BAT wheels like Flamenco.
+- Strip in-pack NLA enable (UI operator only).
+- Hero-blend terminology in code/docs.
+- README: farm scanners may miss packed linked libraries — use ZIP if needed.
+
 ## [v0.2.0] - 2026-10-05
 
 ### Features
