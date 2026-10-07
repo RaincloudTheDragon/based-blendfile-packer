@@ -63,6 +63,114 @@ def _path_looks_udim(path: Path) -> bool:
     return "<UDIM>" in s.upper() or "<udim>" in s or bool(_UDIM_TILE_NAME_RE.search(name))
 
 
+
+def _udim_family_key(path: Path) -> Optional[str]:
+    """Stem family for foo.1001.png / foo.<UDIM>.png; None when not UDIM-shaped."""
+    name = path.name if path else ""
+    if not name:
+        return None
+    if "<UDIM>" in name.upper() or "<udim>" in name:
+        return re.split(r"\.<UDIM>|\.<udim>", name, maxsplit=1, flags=re.IGNORECASE)[0].lower()
+    m = _UDIM_TILE_NAME_RE.search(name)
+    if m:
+        return name[: m.start()].lower()
+    return None
+
+
+def _session_udim_families() -> set[str]:
+    """UDIM stem families owned by live Image datablocks in this session."""
+    fams: set[str] = set()
+    for img in getattr(bpy.data, "images", []) or []:
+        fp = getattr(img, "filepath", None) or ""
+        if fp:
+            try:
+                p = Path(bpy.path.abspath(fp))
+            except Exception:
+                p = Path(fp)
+            key = _udim_family_key(p)
+            if key:
+                fams.add(key)
+            elif getattr(img, "source", "") == "TILED":
+                fams.add(p.stem.lower())
+        elif getattr(img, "source", "") == "TILED":
+            fams.add((img.name or "").lower())
+    return fams
+
+
+def _is_ignorable_missing_asset(path: Path) -> bool:
+    """False positives: BAT-only sparse/phantom UDIM tiles."""
+    try:
+        p = Path(path)
+    except Exception:
+        return False
+    if not p.name:
+        return False
+
+    fam = _udim_family_key(p)
+    if fam is None:
+        return False
+    session_fams = _session_udim_families()
+    if fam not in session_fams:
+        # Nested-blend DNA path with no live Image — BAT phantom.
+        return True
+    # Session owns this UDIM family: absent .10xx tiles are sparse (Report Missing Files stays clean).
+    for img in getattr(bpy.data, "images", []) or []:
+        fp = getattr(img, "filepath", None) or ""
+        img_fam = None
+        if fp:
+            try:
+                img_fam = _udim_family_key(Path(bpy.path.abspath(fp)))
+            except Exception:
+                img_fam = _udim_family_key(Path(fp))
+        if img_fam != fam and (img.name or "").lower() != fam:
+            continue
+        if getattr(img, "packed_file", None) or getattr(img, "is_linked_packed", False):
+            return True
+        if getattr(img, "has_data", False) or (getattr(img, "size", [0]) or [0])[0]:
+            return True
+        if not getattr(img, "is_missing", False):
+            return True
+    return False
+
+
+def _filter_ignorable_missing(missing: list) -> list:
+    """Drop sparse/phantom UDIM false positives from a missing-path list."""
+    if not missing:
+        return missing
+    ignored_udim_fams: set[str] = set()
+    kept: list = []
+    for item in missing:
+        try:
+            p = Path(item)
+        except Exception:
+            kept.append(item)
+            continue
+        if _is_ignorable_missing_asset(p):
+            fam = _udim_family_key(p)
+            if fam:
+                ignored_udim_fams.add(fam)
+            _pack_diag(f"Ignoring false-positive missing: {p.name}", verbose_only=True)
+            continue
+        kept.append(item)
+    if not ignored_udim_fams:
+        return kept
+    # BAT often also lists the bare UDIM stem (no .10xx.ext) next to the tile paths.
+    out: list = []
+    for item in kept:
+        try:
+            p = Path(item)
+        except Exception:
+            out.append(item)
+            continue
+        if not p.suffix:
+            low = p.name.lower()
+            if any(low == fam or low.startswith(fam) or fam.startswith(low) for fam in ignored_udim_fams):
+                _pack_diag(f"Ignoring false-positive missing UDIM stem: {p.name}", verbose_only=True)
+                continue
+        out.append(item)
+    return out
+
+
 def _diag_summarize_asset_usages(asset_usages: dict) -> None:
     """Log BAT discovery stats: per-lib counts, suffixes, UDIM-looking paths."""
     by_suffix: Counter = Counter()
@@ -210,6 +318,7 @@ def _unique_missing_names(missing: list) -> list[str]:
 
 def _log_missing_assets_summary(missing: list) -> str:
     """Print Flamenco-style offline-files summary; return a UI message with basenames (or "")."""
+    missing = _filter_ignorable_missing(missing)
     names = _unique_missing_names(missing)
     if not names:
         return ""
@@ -1590,6 +1699,10 @@ class IncrementalPacker:
                         len(asset_usage.abspath.parts) >= 2 and asset_usage.abspath.parts[-2] == "bakes"
                     ):
                         continue
+                    # BAT phantom / sparse UDIM tiles — not real pack targets.
+                    if _is_ignorable_missing_asset(asset_usage.abspath):
+                        _pack_diag(f"Skip copy (ignorable): {name}", verbose_only=True)
+                        continue
                     seen_resolved.add(resolved)
                     try:
                         asset_relpath = resolved.relative_to(self.common_root)
@@ -1637,6 +1750,9 @@ class IncrementalPacker:
                     continue
                 src_path = stale_path
                 if not src_path.exists():
+                    if _is_ignorable_missing_asset(stale_path):
+                        _pack_diag(f"Skip missing (ignorable): {stale_path.name}", verbose_only=True)
+                        continue
                     t_rec = time.perf_counter()
                     recovered = recover_stale_path(stale_path, self.search_roots, self._recovery_cache)
                     self._recovery_time_s += time.perf_counter() - t_rec
@@ -1677,7 +1793,8 @@ class IncrementalPacker:
                         print(f"[BBP Pack]   Copied: {src_path.name} ({file_size} bytes)")
                 except Exception as e:
                     print(f"[BBP Pack]   ERROR copying asset {src_path.name}: {type(e).__name__}: {str(e)}")
-                    self.missing_on_copy.append(stale_path)
+                    if not _is_ignorable_missing_asset(stale_path):
+                        self.missing_on_copy.append(stale_path)
             
             self.assets_copied = batch_end
             
@@ -1697,8 +1814,10 @@ class IncrementalPacker:
                 _diag_copied_udim_tiles(self.target_path)
                 # Collect missing for end-of-pack report (non-fatal; Flamenco-style)
                 if self.missing_on_copy:
+                    self.missing_on_copy = _filter_ignorable_missing(self.missing_on_copy)
                     self.missing_files_all.extend(self.missing_on_copy)
-                    print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
+                    if self.missing_on_copy:
+                        print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
                 # Check if we need to truncate caches. Skip truncation for COPY_ONLY workflow if caches were filtered during copy
                 caches_filtered_during_copy = (self.copy_only_mode and 
                                              self.frame_start is not None and 
@@ -1941,6 +2060,7 @@ class IncrementalPacker:
             if self._timed_phase is not None:
                 _pack_diag(f"Phase {self._timed_phase} took {time.perf_counter() - self._phase_t0:.2f}s", verbose_only=True)
             _pack_diag(f"PackSession total wall time: {time.perf_counter() - self._session_t0:.2f}s")
+            self.missing_files_all = _filter_ignorable_missing(self.missing_files_all)
             _pack_diag(
                 f"Final: copied_paths={len(self.copied_paths)} missing={len(self.missing_files_all)} "
                 f"recovery_hits={self._recovery_hits} blends_to_process={len(self.to_remap or [])}"
@@ -2153,6 +2273,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
             if _is_excluded_media_path(stale_path, exclude_av):
                 print(f"[BBP Pack]   Skipping excluded media: {stale_path.name}")
                 continue
+            if _is_ignorable_missing_asset(stale_path):
+                _pack_diag(f"Skip copy (ignorable): {stale_path.name}", verbose_only=True)
+                continue
             src_path = stale_path
             if not src_path.exists():
                 t_rec = time.perf_counter()
@@ -2192,7 +2315,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                     print(f"[BBP Pack]   Copied: {src_path.name} ({file_size} bytes)")
             except Exception as e:
                 print(f"[BBP Pack]   ERROR copying asset {src_path.name}: {type(e).__name__}: {str(e)}")
-                missing_on_copy.append(stale_path)
+                if not _is_ignorable_missing_asset(stale_path):
+                    missing_on_copy.append(stale_path)
     
     print(f"[BBP Pack] Finished copying assets. Total copied: {len(copied_paths)}, Missing: {len(missing_on_copy)}")
     _pack_diag(
@@ -2200,6 +2324,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
         f"time={recovery_time_s:.2f}s cache_keys={len(recovery_cache)}"
     )
     _diag_copied_udim_tiles(target_path)
+    missing_on_copy[:] = _filter_ignorable_missing(missing_on_copy)
     missing_files_report = list(missing_on_copy)
     if missing_on_copy:
         print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in missing_on_copy[:5]]}...")
