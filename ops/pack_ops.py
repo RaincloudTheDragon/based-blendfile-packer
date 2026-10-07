@@ -1026,15 +1026,84 @@ def remap_library_paths(
     return unresolved
 
 
-def pack_all_in_blend(blend_path: Path) -> list[Path]:
+def pack_all_in_blend(blend_path: Path, pack_root: Optional[Path] = None) -> list[Path]:
     """Open a blend and pack all external files into it so headless render has no missing images.
 
     Logic lives in ops/pack_all_blend.py (readable Blender --python entrypoint).
     """
+    import json
+    import tempfile
+
     script_path = Path(__file__).resolve().parent / "pack_all_blend.py"
-    _run_blender_python_file(script_path, blend_path, config_path=None, timeout=300)
-    # Parse missing files from output if needed (currently unused by callers).
-    return []
+    cfg_file = None
+    try:
+        if pack_root is not None:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+                json.dump({"pack_root": str(pack_root)}, f)
+                cfg_file = Path(f.name)
+        stdout, _stderr, _code = _run_blender_python_file(
+            script_path, blend_path, config_path=cfg_file, timeout=300
+        )
+    finally:
+        if cfg_file is not None:
+            try:
+                cfg_file.unlink()
+            except OSError:
+                pass
+    missing: list[Path] = []
+    if stdout:
+        for line in stdout.splitlines():
+            if line.startswith("UNPACKED_TEXT:") or line.startswith("UNPACKED_IMAGE:"):
+                # Surface basename after the label for the end-of-pack report.
+                rest = line.split(":", 1)[-1].strip().split("|", 1)[0].strip()
+                if rest:
+                    missing.append(Path(rest))
+    return missing
+
+
+def _collect_pack_tree_blends(
+    target_path: Path,
+    top_level: Optional[Path],
+    copy_map: dict,
+) -> list[Path]:
+    """Every .blend copied into the pack tree — deps first, top-level last.
+
+    BAT's find_blend_asset_usage() only sees session-visible links; prop/rig libs (and their textures) still need remap+pack_all before pack_libraries embeds them.
+    """
+    seen: set[str] = set()
+    blends: list[Path] = []
+
+    def _add(p: Path) -> None:
+        try:
+            if not p.is_file() or p.suffix.lower() != ".blend":
+                return
+            key = _norm_copy_map_key(p)
+            if key in seen:
+                return
+            seen.add(key)
+            blends.append(p.resolve())
+        except OSError:
+            return
+
+    for dest in (copy_map or {}).values():
+        _add(Path(dest))
+    if top_level:
+        _add(Path(top_level))
+    try:
+        for p in target_path.rglob("*.blend"):
+            # Skip localized staging copies — real libs live under DRIVE_*/UNC_*.
+            if "_bbp_linked" in p.parts:
+                continue
+            _add(p)
+    except OSError as e:
+        _pack_diag(f"pack-tree blend scan failed: {e}")
+
+    top_key = _norm_copy_map_key(top_level) if top_level else None
+    deps = [p for p in blends if _norm_copy_map_key(p) != top_key]
+    # Deeper paths first (nested asset libs before scenes that link them).
+    deps.sort(key=lambda p: (-len(p.parts), str(p).lower()))
+    tops = [p for p in blends if _norm_copy_map_key(p) == top_key]
+    return deps + tops
 
 
 def _get_project_size_limit_bytes(context=None):
@@ -1052,7 +1121,12 @@ def _get_project_size_limit_bytes(context=None):
         return 2 * 1024 * 1024 * 1024
 
 
-def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None) -> tuple[list[Path], list[Path]]:
+def pack_linked_in_blend(
+    blend_path: Path,
+    max_size_bytes: Optional[int] = None,
+    pack_root: Optional[Path] = None,
+    search_roots: Optional[list] = None,
+) -> tuple[list[Path], list[Path]]:
     """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
 
     Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the top-level blend stays hollow (~source size) while the ZIP still holds the trees.
@@ -1069,8 +1143,13 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
     script_path = Path(__file__).resolve().parent / "pack_linked_blend.py"
     cfg_file = None
     try:
+        payload = {
+            "max_size_bytes": int(max_size_bytes),
+            "pack_root": str(pack_root) if pack_root else str(blend_path.parent),
+            "search_roots": [str(p) for p in (search_roots or [])],
+        }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-            json.dump({"max_size_bytes": int(max_size_bytes)}, f)
+            json.dump(payload, f)
             cfg_file = Path(f.name)
         stdout, stderr, returncode = _run_blender_python_file(
             script_path, blend_path, config_path=cfg_file, timeout=600
@@ -1086,20 +1165,47 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
     oversized_files: list[Path] = []
     unpacked_libs: list[str] = []
     pack_errors: list[str] = []
+
+    def _add_missing(label: str) -> None:
+        """Deduped missing entry; keep first path segment before '|' diagnostics."""
+        text = (label or "").strip().split("|", 1)[0].strip()
+        if not text:
+            return
+        path = Path(text)
+        if path not in missing_files and text not in {str(p) for p in missing_files}:
+            missing_files.append(path)
+
     if stdout:
         for line in stdout.splitlines():
             if line.startswith("MISSING_FILE:"):
-                try:
-                    missing_files.append(Path(line.replace("MISSING_FILE:", "").strip()))
-                except Exception:
-                    pass
+                _add_missing(line.replace("MISSING_FILE:", "", 1))
             elif line.startswith("OVERSIZED_FILE:"):
                 try:
-                    oversized_files.append(Path(line.replace("OVERSIZED_FILE:", "").strip()))
+                    oversized_files.append(Path(line.replace("OVERSIZED_FILE:", "").strip().split("|", 1)[0].strip()))
                 except Exception:
                     pass
             elif line.startswith("UNPACKED_LIB:"):
-                unpacked_libs.append(line.replace("UNPACKED_LIB:", "").strip())
+                # "NAME" or "NAME | fp=..."
+                name = line.replace("UNPACKED_LIB:", "").strip().split("|", 1)[0].strip()
+                unpacked_libs.append(name)
+                _add_missing(name)
+            elif line.startswith("UNPACKED_TEXT:"):
+                name = line.replace("UNPACKED_TEXT:", "").strip().split("|", 1)[0].strip()
+                unpacked_libs.append(name)
+                _add_missing(name)
+            elif line.startswith("MISSING_ID:"):
+                # "materials/SomeMat | lib=SomeLib.blend.004 | fp=..."
+                body = line.replace("MISSING_ID:", "", 1).strip()
+                id_part = body.split("|", 1)[0].strip()
+                lib_part = ""
+                for part in body.split("|"):
+                    part = part.strip()
+                    if part.startswith("lib="):
+                        lib_part = part[4:].strip()
+                        break
+                label = f"{lib_part}: {id_part}" if lib_part else id_part
+                unpacked_libs.append(label)
+                _add_missing(label)
             elif line.startswith("PACK_ERROR:"):
                 pack_errors.append(line.replace("PACK_ERROR:", "").strip())
 
@@ -1109,8 +1215,18 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
         r"Unable to pack file, source path '([^']+)' not found",
         r"Cannot pack absolute file:\s*'([^']+)'",
         r"File not found:\s*(.+)",
+        # Blender: LIB: Material: 'SomeMat' missing from 'C:\...\SomeLib.blend'
+        r"missing from\s+'([^']+)'",
+        r"(\d+)\s+libraries and\s+(\d+)\s+linked data-blocks are missing",
     ):
         for match in re.finditer(pattern, combined_output, re.IGNORECASE):
+            if "libraries and" in pattern:
+                # Surface a synthetic marker so the end report is not silent.
+                marker = Path(f"{match.group(1)}_libs_{match.group(2)}_ids_missing")
+                if marker not in missing_files:
+                    missing_files.append(marker)
+                    print(f"[BBP Pack]   WARNING: Blender reports {match.group(1)} libraries and {match.group(2)} linked data-blocks missing")
+                continue
             missing_path_str = match.group(1).strip()
             if missing_path_str.startswith("//"):
                 try:
@@ -1121,6 +1237,7 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
                 missing_path = Path(missing_path_str)
             if missing_path not in missing_files:
                 missing_files.append(missing_path)
+                print(f"[BBP Pack]   WARNING: Blender reports missing library/ID path: {missing_path.name}")
 
     if missing_files:
         print(f"[BBP Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
@@ -1154,7 +1271,7 @@ def pack_linked_in_blend(blend_path: Path, max_size_bytes: Optional[int] = None)
 
     # Surface hollow-pack failure as missing so end-of-pack report is honest.
     for name in unpacked_libs:
-        missing_files.append(Path(name))
+        _add_missing(name)
 
     return missing_files, oversized_files
 
@@ -1628,31 +1745,19 @@ class IncrementalPacker:
             print(f"[BBP Pack] Finding blend dependencies...")
             if self.progress_callback:
                 self.progress_callback(45.0, "Finding blend dependencies...")
+            # Keep BAT map for diagnostics; process every .blend we copied (not just session-visible links).
             self.blend_deps = au.find_blend_asset_usage()
-            self.to_remap = []
-            
-            # Add top-level blend (use the copied target path, not the original)
-            if self.top_level_target_blend and self.top_level_target_blend.exists():
-                self.to_remap.append(self.top_level_target_blend)
-                print(f"[BBP Pack]   Added top-level blend to remap list: {self.top_level_target_blend.name}")
-            
-            # Add all dependent blend files
-            for lib in self.blend_deps.keys():
-                abs_path = au.library_abspath(lib)
-                if abs_path.suffix.lower() != ".blend":
-                    continue
+            self.to_remap = _collect_pack_tree_blends(
+                self.target_path, self.top_level_target_blend, self.copy_map
+            )
+            for p in self.to_remap:
                 try:
-                    rel = abs_path.relative_to(self.common_root)
+                    label = p.relative_to(self.target_path)
                 except ValueError:
-                    rel = compute_target_relpath(abs_path, self.common_root)
-                target_blend = self.target_path / rel
-                if target_blend.exists():
-                    self.to_remap.append(target_blend)
-                    print(f"[BBP Pack]   Added dependent blend to remap list: {target_blend.name}")
-                else:
-                    print(f"[BBP Pack]   WARNING: Dependent blend not found at target: {target_blend}")
-            
-            print(f"[BBP Pack] Found {len(self.to_remap)} blend files to process")
+                    label = p.name
+                print(f"[BBP Pack]   Blend to process: {label}")
+            print(f"[BBP Pack] Found {len(self.to_remap)} blend files to process (full pack tree)")
+            _pack_diag(f"BAT blend_deps groups: {len(self.blend_deps)}; pack-tree blends: {len(self.to_remap)}")
             self.nla_index = 0
             self.phase = 'ENABLE_NLA' if self.enable_nla else 'REMAP_PATHS'
             return (self.phase, False)
@@ -1737,8 +1842,10 @@ class IncrementalPacker:
                         self.progress_callback(progress_pct, f"Packing assets... ({self.pack_all_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.pack_all_index + 1}/{len(self.to_remap)}] Packing all in: {blend_to_fix.name}")
                     t_blend = time.perf_counter()
-                    pack_all_in_blend(blend_to_fix)
-                    _pack_diag(f"pack_all {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s", verbose_only=True)
+                    unpacked = pack_all_in_blend(blend_to_fix, pack_root=self.target_path)
+                    if unpacked:
+                        self.missing_files_all.extend(unpacked)
+                    _pack_diag(f"pack_all {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s unpacked={len(unpacked or [])}", verbose_only=True)
                 self.pack_all_index += 1
                 return ('PACK_ALL', False)
             else:
@@ -1787,7 +1894,12 @@ class IncrementalPacker:
                     print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
                         t_blend = time.perf_counter()
-                        missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=self.max_size_bytes)
+                        missing_files, oversized_files = pack_linked_in_blend(
+                            blend_to_fix,
+                            max_size_bytes=self.max_size_bytes,
+                            pack_root=self.target_path,
+                            search_roots=self.search_roots,
+                        )
                         _pack_diag(
                             f"pack_linked {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s "
                             f"missing={len(missing_files or [])} oversized={len(oversized_files or [])}",
@@ -2099,17 +2211,8 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
     if cancel_check and cancel_check():
         raise InterruptedError("Packing cancelled by user")
     blend_deps = au.find_blend_asset_usage()
-    to_remap = []
-    for abs_path in [top_level_blend_abs] + [au.library_abspath(lib) for lib in blend_deps.keys()]:
-        if abs_path.suffix.lower() != ".blend":
-            continue
-        try:
-            rel = abs_path.relative_to(common_root)
-        except ValueError:
-            rel = compute_target_relpath(abs_path, common_root)
-        to_remap.append(target_path / rel)
-    
-    print(f"[BBP Pack] Found {len(to_remap)} blend files to process")
+    to_remap = _collect_pack_tree_blends(target_path, top_level_target_blend, copy_map)
+    print(f"[BBP Pack] Found {len(to_remap)} blend files to process (full pack tree; BAT groups={len(blend_deps)})")
     
     # Enable NLA before packing
     if enable_nla:
@@ -2162,7 +2265,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                 if progress_callback:
                     progress_callback(progress_pct, f"Packing assets... ({i}/{len(to_remap)})")
                 print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing all in: {blend_to_fix.name}")
-                pack_all_in_blend(blend_to_fix)
+                unpacked = pack_all_in_blend(blend_to_fix, pack_root=target_path)
+                if unpacked:
+                    missing_files_report.extend(unpacked)
         print(f"[BBP Pack] Finished packing all assets")
         
         if run_pack_linked:
@@ -2194,7 +2299,12 @@ def pack_project(workflow: str, target_path: Optional[Path] = None, enable_nla: 
                         progress_callback(progress_pct, f"Packing linked... ({i}/{len(to_remap)})")
                     print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
                     max_size_bytes = _get_project_size_limit_bytes()
-                    missing_files, oversized_files = pack_linked_in_blend(blend_to_fix, max_size_bytes=max_size_bytes)
+                    missing_files, oversized_files = pack_linked_in_blend(
+                        blend_to_fix,
+                        max_size_bytes=max_size_bytes,
+                        pack_root=target_path,
+                        search_roots=search_roots,
+                    )
                     if missing_files:
                         missing_files_all.extend(missing_files)
                     issues = []
@@ -2502,6 +2612,16 @@ class BBP_OT_pack_zip(Operator):
                     if target_blend and target_blend.exists():
                         _pack_debug(f"Applying frame range to target blend: {target_blend.name}")
                         apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
+                        # Frame-range save can resurrect ghost Library stubs; re-seal pack_libraries/texts.
+                        print(f"[BBP Pack] Sealing packed blend after frame range: {target_blend.name}")
+                        seal_missing, _seal_over = pack_linked_in_blend(
+                            target_blend,
+                            max_size_bytes=_get_project_size_limit_bytes(context),
+                            pack_root=self._target_path or target_blend.parent,
+                            search_roots=getattr(self._packer, "search_roots", None) or [],
+                        )
+                        if seal_missing and self._packer:
+                            self._packer.missing_files_all.extend(seal_missing)
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
                                 area.tag_redraw()
@@ -3067,6 +3187,16 @@ class BBP_OT_pack_blend(Operator):
                     # Apply frame range to the target blend file before submission
                     print(f"[BBP Pack] Applying frame range to target blend file: {self._blend_path.name}")
                     apply_frame_range_to_blend(self._blend_path, self._frame_start, self._frame_end, self._frame_step)
+                    # Frame-range save can resurrect ghost Library stubs; re-seal pack_libraries/texts.
+                    print(f"[BBP Pack] Sealing packed blend after frame range: {self._blend_path.name}")
+                    seal_missing, _seal_over = pack_linked_in_blend(
+                        self._blend_path,
+                        max_size_bytes=_get_project_size_limit_bytes(context),
+                        pack_root=self._target_path or self._blend_path.parent,
+                        search_roots=getattr(self._packer, "search_roots", None) or [],
+                    )
+                    if seal_missing and self._packer:
+                        self._packer.missing_files_all.extend(seal_missing)
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
                     return {'RUNNING_MODAL'}
