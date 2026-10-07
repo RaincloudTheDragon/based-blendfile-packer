@@ -16,6 +16,7 @@ import bpy
 from bpy.types import Operator
 from bpy.props import EnumProperty
 
+from .. import config
 from ..utils import bat_asset_usage as au
 from ..utils import wm_progress
 from .export_ops import _MEDIA_EXTENSIONS
@@ -1649,6 +1650,10 @@ class IncrementalPacker:
         self._session_t0 = time.perf_counter()
         self._timed_phase = None
         self._phase_t0 = self._session_t0
+        # Hang-threshold UI yields (Atomic scanner pattern): last slow unit for status.
+        self.hang_phase = None
+        self.hang_name = None
+        self.hang_elapsed = None
         
         # Results
         self.file_path = None
@@ -1666,16 +1671,34 @@ class IncrementalPacker:
         _pack_diag(f"Phase {self._timed_phase} took {elapsed:.2f}s", verbose_only=True)
         self._timed_phase = self.phase
         self._phase_t0 = time.perf_counter()
+
+    def _progress(self, pct: float, message: str) -> None:
+        """Progress callback with optional hang-status suffix."""
+        if not self.progress_callback:
+            return
+        self.progress_callback(pct, f"{message}{config.hang_status_suffix(self)}")
+
+    def _unit_took_too_long(self, phase: str, name: str, t0: float) -> bool:
+        """True when this unit exceeded hang threshold — caller should end the timer tick."""
+        elapsed = time.perf_counter() - t0
+        if elapsed < config.PACK_HANG_THRESHOLD_SEC:
+            return False
+        config.note_pack_hang(self, phase, name, elapsed)
+        if _verbose_pack_log_enabled():
+            print(f"[BBP Pack] SLOW {phase}: '{name}' took {elapsed:.2f}s", flush=True)
+        return True
     
-    def process_batch(self, batch_size: int = 20) -> Tuple[str, bool]:
-        """
-        Process one batch of work.
+    def process_batch(self, batch_size: Optional[int] = None) -> Tuple[str, bool]:
+        """Process one timer-tick of work.
+
+        Unbounded by default (Atomic-style): keep going until the phase ends or a single unit exceeds ``PACK_HANG_THRESHOLD_SEC``, then yield so the UI can redraw.
+        *batch_size* caps units per tick when set.
 
         Returns:
             Tuple of (next_phase, is_complete)
-            - next_phase: Next phase name to continue with
-            - is_complete: True if packing is fully complete
         """
+        if batch_size is None:
+            batch_size = config.PACK_BATCH_UNBOUNDED
         if self.cancel_check and self.cancel_check():
             raise InterruptedError("Packing cancelled by user")
 
@@ -1868,27 +1891,35 @@ class IncrementalPacker:
             return ('COPY_ASSETS', False)
         
         elif self.phase == 'COPY_ASSETS':
-            # Copy batch_size assets
+            # Unbounded copy per tick; yield after a slow unit (hang threshold).
             total_assets = len(self.assets_to_copy)
-            batch_end = min(self.assets_copied + batch_size, total_assets)
-            
-            for i in range(self.assets_copied, batch_end):
-                asset_usage, asset_relpath = self.assets_to_copy[i]
+            units_this_tick = 0
+            while self.assets_copied < total_assets and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
+                i = self.assets_copied
+                asset_usage, _asset_relpath = self.assets_to_copy[i]
                 stale_path = asset_usage.abspath
+                t0 = time.perf_counter()
                 try:
                     stale_resolved = stale_path.resolve()
                 except OSError:
                     stale_resolved = Path(stale_path)
                 if stale_resolved in self.copied_paths:
+                    self.assets_copied = i + 1
+                    units_this_tick += 1
                     continue
-                # Skip video/audio entirely when exclude is enabled (ZIP + missing abort)
                 if _is_excluded_media_path(stale_path, self.exclude_av):
                     print(f"[BBP Pack]   Skipping excluded media: {stale_path.name}")
+                    self.assets_copied = i + 1
+                    units_this_tick += 1
                     continue
                 src_path = stale_path
                 if not src_path.exists():
                     if _is_ignorable_missing_asset(stale_path):
                         _pack_diag(f"Skip missing (ignorable): {stale_path.name}", verbose_only=True)
+                        self.assets_copied = i + 1
+                        units_this_tick += 1
                         continue
                     t_rec = time.perf_counter()
                     recovered = recover_stale_path(stale_path, self.search_roots, self._recovery_cache)
@@ -1897,6 +1928,10 @@ class IncrementalPacker:
                         self._recovery_misses += 1
                         print(f"[BBP Pack]   WARNING: Asset does not exist: {stale_path}")
                         self.missing_on_copy.append(stale_path)
+                        self.assets_copied = i + 1
+                        units_this_tick += 1
+                        if self._unit_took_too_long("copy", stale_path.name, t0):
+                            break
                         continue
                     self._recovery_hits += 1
                     _pack_diag(f"Recovered: {stale_path.name} -> {recovered}", verbose_only=True)
@@ -1906,17 +1941,17 @@ class IncrementalPacker:
                 except OSError:
                     src_resolved = Path(src_path)
                 if src_resolved in self.copied_paths:
-                    # Live file already packed; only rebind the stale key for remap.
                     dest = self.copy_map.get(_norm_copy_map_key(src_resolved))
                     if dest:
                         self.copy_map[_norm_copy_map_key(stale_path)] = dest
                     self.copied_paths.add(stale_resolved)
+                    self.assets_copied = i + 1
+                    units_this_tick += 1
                     continue
                 try:
                     asset_relpath = src_resolved.relative_to(self.common_root)
                 except ValueError:
                     asset_relpath = compute_target_relpath(src_resolved, self.common_root)
-                
                 target_asset_path = self.target_path / asset_relpath
                 try:
                     target_asset_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1924,7 +1959,6 @@ class IncrementalPacker:
                     shutil.copy2(src_path, target_asset_path)
                     self.copied_paths.add(src_resolved)
                     self.copied_paths.add(stale_resolved)
-                    # Register for remap (include .py/texts etc. so stale keys rebind)
                     _copy_map_register(self.copy_map, stale_path, src_resolved, target_asset_path)
                     if (i < 5) or (i % 50 == 0):
                         print(f"[BBP Pack]   Copied: {src_path.name} ({file_size} bytes)")
@@ -1932,70 +1966,73 @@ class IncrementalPacker:
                     print(f"[BBP Pack]   ERROR copying asset {src_path.name}: {type(e).__name__}: {str(e)}")
                     if not _is_ignorable_missing_asset(stale_path):
                         self.missing_on_copy.append(stale_path)
-            
-            self.assets_copied = batch_end
-            
-            # Update progress
+                self.assets_copied = i + 1
+                units_this_tick += 1
+                if self._unit_took_too_long("copy", stale_path.name, t0):
+                    break
+
             progress_pct = 15.0 + (self.assets_copied / total_assets * 30.0) if total_assets > 0 else 15.0
-            if self.progress_callback:
-                self.progress_callback(progress_pct, f"Copying assets... ({self.assets_copied}/{total_assets})")
-            if self.assets_copied % 10 == 0 or self.assets_copied == total_assets:
+            self._progress(progress_pct, f"Copying assets... ({self.assets_copied}/{total_assets})")
+            if self.assets_copied % 10 == 0 or self.assets_copied == total_assets or self.hang_name:
                 print(f"[BBP Pack]   Copied {self.assets_copied}/{total_assets} assets ({progress_pct:.1f}%)...")
-            
-            if self.assets_copied >= total_assets:
-                print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
-                _pack_diag(
-                    f"Stale recovery: hits={self._recovery_hits} misses={self._recovery_misses} "
-                    f"time={self._recovery_time_s:.2f}s cache_keys={len(self._recovery_cache)}"
-                )
-                _diag_copied_udim_tiles(self.target_path)
-                # Collect missing for end-of-pack report (non-fatal; Flamenco-style)
+
+            if self.assets_copied < total_assets:
+                return ('COPY_ASSETS', False)
+
+            print(f"[BBP Pack] Finished copying assets. Total copied: {len(self.copied_paths)}, Missing: {len(self.missing_on_copy)}")
+            _pack_diag(
+                f"Stale recovery: hits={self._recovery_hits} misses={self._recovery_misses} "
+                f"time={self._recovery_time_s:.2f}s cache_keys={len(self._recovery_cache)}"
+            )
+            _diag_copied_udim_tiles(self.target_path)
+            if self.missing_on_copy:
+                self.missing_on_copy = _filter_ignorable_missing(self.missing_on_copy)
+                self.missing_files_all.extend(self.missing_on_copy)
                 if self.missing_on_copy:
-                    self.missing_on_copy = _filter_ignorable_missing(self.missing_on_copy)
-                    self.missing_files_all.extend(self.missing_on_copy)
-                    if self.missing_on_copy:
-                        print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
-                # Check if we need to truncate caches. Skip truncation for COPY_ONLY workflow if caches were filtered during copy
-                caches_filtered_during_copy = (self.copy_only_mode and 
-                                             self.frame_start is not None and 
-                                             self.frame_end is not None and 
-                                             self.frame_step is not None)
-                if (self.frame_start is not None and self.frame_end is not None and 
-                    self.frame_step is not None and self.cache_dirs and 
-                    not caches_filtered_during_copy):
-                    self.cache_truncate_index = 0
-                    self.phase = 'TRUNCATING_CACHES'
-                    return ('TRUNCATING_CACHES', False)
-                else:
-                    if caches_filtered_during_copy:
-                        print(f"[BBP Pack] Caches were filtered during copy, skipping truncation phase")
-                    self.phase = 'FIND_DEPENDENCIES'
-                    return ('FIND_DEPENDENCIES', False)
-            else:
-                return ('COPY_ASSETS', False)  # More batches needed
+                    print(f"[BBP Pack]   Missing/offline (will report on complete): {[str(p) for p in self.missing_on_copy[:5]]}...")
+            caches_filtered_during_copy = (self.copy_only_mode and
+                                         self.frame_start is not None and
+                                         self.frame_end is not None and
+                                         self.frame_step is not None)
+            if (self.frame_start is not None and self.frame_end is not None and
+                self.frame_step is not None and self.cache_dirs and
+                not caches_filtered_during_copy):
+                self.cache_truncate_index = 0
+                self.phase = 'TRUNCATING_CACHES'
+                return ('TRUNCATING_CACHES', False)
+            if caches_filtered_during_copy:
+                print(f"[BBP Pack] Caches were filtered during copy, skipping truncation phase")
+            self.phase = 'FIND_DEPENDENCIES'
+            return ('FIND_DEPENDENCIES', False)
         
         elif self.phase == 'TRUNCATING_CACHES':
             if self.cache_truncate_index == 0:
                 print(f"[BBP Pack] Truncating caches to frame range {self.frame_start}-{self.frame_end} (step: {self.frame_step})...")
-                if self.progress_callback:
-                    self.progress_callback(45.0, "Truncating caches to frame range...")
-            
-            # Process one cache directory per batch
-            if self.cache_truncate_index < len(self.cache_dirs):
+                self._progress(45.0, "Truncating caches to frame range...")
+            units_this_tick = 0
+            while self.cache_truncate_index < len(self.cache_dirs) and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
                 cache_dir = self.cache_dirs[self.cache_truncate_index]
+                t0 = time.perf_counter()
                 if cache_dir.exists() and cache_dir.is_dir():
                     progress_pct = 45.0 + ((self.cache_truncate_index + 1) / len(self.cache_dirs) * 0.5) if self.cache_dirs else 45.0
-                    if self.progress_callback:
-                        self.progress_callback(progress_pct, f"Truncating caches... ({self.cache_truncate_index + 1}/{len(self.cache_dirs)} cache directories)")
+                    self._progress(
+                        progress_pct,
+                        f"Truncating caches... ({self.cache_truncate_index + 1}/{len(self.cache_dirs)} cache directories)",
+                    )
                     print(f"[BBP Pack]   [{self.cache_truncate_index + 1}/{len(self.cache_dirs)}] Truncating cache: {cache_dir.name}")
                     files_removed = truncate_caches_to_frame_range(cache_dir, self.frame_start, self.frame_end, self.frame_step)
                     print(f"[BBP Pack]   Removed {files_removed} cache files outside frame range")
                 self.cache_truncate_index += 1
+                units_this_tick += 1
+                if self._unit_took_too_long("truncate", cache_dir.name, t0):
+                    break
+            if self.cache_truncate_index < len(self.cache_dirs):
                 return ('TRUNCATING_CACHES', False)
-            else:
-                print(f"[BBP Pack] Finished truncating caches to frame range {self.frame_start}-{self.frame_end}")
-                self.phase = 'FIND_DEPENDENCIES'
-                return ('FIND_DEPENDENCIES', False)
+            print(f"[BBP Pack] Finished truncating caches to frame range {self.frame_start}-{self.frame_end}")
+            self.phase = 'FIND_DEPENDENCIES'
+            return ('FIND_DEPENDENCIES', False)
         
         elif self.phase == 'FIND_DEPENDENCIES':
             print(f"[BBP Pack] Finding blend dependencies...")
@@ -2021,41 +2058,43 @@ class IncrementalPacker:
         elif self.phase == 'ENABLE_NLA':
             if self.nla_index == 0:
                 print(f"[BBP Pack] Enabling NLA tracks in blend files...")
-                if self.progress_callback:
-                    self.progress_callback(50.0, "Enabling NLA tracks...")
-            
-            # Process one blend file per batch
-            if self.nla_index < len(self.to_remap):
+                self._progress(50.0, "Enabling NLA tracks...")
+            units_this_tick = 0
+            while self.nla_index < len(self.to_remap) and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
                 blend_to_fix = self.to_remap[self.nla_index]
+                t0 = time.perf_counter()
                 if blend_to_fix.exists():
                     progress_pct = 50.0 + ((self.nla_index + 1) / len(self.to_remap) * 5.0) if self.to_remap else 50.0
-                    if self.progress_callback:
-                        self.progress_callback(progress_pct, f"Enabling NLA in blend files... ({self.nla_index + 1}/{len(self.to_remap)})")
+                    self._progress(progress_pct, f"Enabling NLA in blend files... ({self.nla_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.nla_index + 1}/{len(self.to_remap)}] Enabling NLA in: {blend_to_fix.name}")
                     enable_nla_in_blend(blend_to_fix, autopack_on_save=self.autopack_on_save)
                 self.nla_index += 1
+                units_this_tick += 1
+                if self._unit_took_too_long("nla", blend_to_fix.name, t0):
+                    break
+            if self.nla_index < len(self.to_remap):
                 return ('ENABLE_NLA', False)
-            else:
-                print(f"[BBP Pack] Finished enabling NLA")
-                self.remap_index = 0
-                self.phase = 'REMAP_PATHS'
-                return ('REMAP_PATHS', False)
+            print(f"[BBP Pack] Finished enabling NLA")
+            self.remap_index = 0
+            self.phase = 'REMAP_PATHS'
+            return ('REMAP_PATHS', False)
         
         elif self.phase == 'REMAP_PATHS':
             if self.remap_index == 0:
                 print(f"[BBP Pack] Remapping library paths in blend files...")
-                if self.progress_callback:
-                    self.progress_callback(55.0, "Remapping library paths...")
-            
-            # Process one blend file per batch
-            if self.remap_index < len(self.to_remap):
+                self._progress(55.0, "Remapping library paths...")
+            units_this_tick = 0
+            while self.remap_index < len(self.to_remap) and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
                 blend_to_fix = self.to_remap[self.remap_index]
+                t0 = time.perf_counter()
                 if blend_to_fix.exists():
                     progress_pct = 55.0 + ((self.remap_index + 1) / len(self.to_remap) * 10.0) if self.to_remap else 55.0
-                    if self.progress_callback:
-                        self.progress_callback(progress_pct, f"Remapping paths... ({self.remap_index + 1}/{len(self.to_remap)})")
+                    self._progress(progress_pct, f"Remapping paths... ({self.remap_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.remap_index + 1}/{len(self.to_remap)}] Remapping paths in: {blend_to_fix.name}")
-                    t_blend = time.perf_counter()
                     unresolved = remap_library_paths(
                         blend_to_fix,
                         self.copy_map,
@@ -2064,61 +2103,69 @@ class IncrementalPacker:
                         ensure_autopack=self.autopack_on_save,
                         search_roots=self.search_roots,
                     )
-                    _pack_diag(f"remap {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s unresolved={len(unresolved or [])}", verbose_only=True)
+                    _pack_diag(
+                        f"remap {blend_to_fix.name}: {time.perf_counter() - t0:.2f}s unresolved={len(unresolved or [])}",
+                        verbose_only=True,
+                    )
                     if unresolved:
                         print(f"[BBP Pack]     WARNING: {len(unresolved)} paths could not be remapped in {blend_to_fix.name}")
-                        for up in unresolved[:3]:  # Show first 3
+                        for up in unresolved[:3]:
                             print(f"[BBP Pack]       - {up}")
                         if len(unresolved) > 3:
                             print(f"[BBP Pack]       ... and {len(unresolved) - 3} more")
                 self.remap_index += 1
+                units_this_tick += 1
+                if self._unit_took_too_long("remap", blend_to_fix.name, t0):
+                    break
+            if self.remap_index < len(self.to_remap):
                 return ('REMAP_PATHS', False)
-            else:
-                print(f"[BBP Pack] Finished remapping library paths")
-                if not self.copy_only_mode:
-                    self.pack_all_index = 0
-                    self.phase = 'PACK_ALL'
-                    return ('PACK_ALL', False)
-                else:
-                    self.phase = 'COMPLETE'
-                    return ('COMPLETE', False)
+            print(f"[BBP Pack] Finished remapping library paths")
+            if not self.copy_only_mode:
+                self.pack_all_index = 0
+                self.phase = 'PACK_ALL'
+                return ('PACK_ALL', False)
+            self.phase = 'COMPLETE'
+            return ('COMPLETE', False)
         
         elif self.phase == 'PACK_ALL':
             if self.pack_all_index == 0:
                 print(f"[BBP Pack] Packing all assets into blend files...")
-                if self.progress_callback:
-                    self.progress_callback(65.0, "Packing assets into blend files...")
-            
-            # Process one blend file per batch
-            if self.pack_all_index < len(self.to_remap):
+                self._progress(65.0, "Packing assets into blend files...")
+            units_this_tick = 0
+            while self.pack_all_index < len(self.to_remap) and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
                 blend_to_fix = self.to_remap[self.pack_all_index]
+                t0 = time.perf_counter()
                 if blend_to_fix.exists():
                     progress_pct = 65.0 + ((self.pack_all_index + 1) / len(self.to_remap) * 15.0) if self.to_remap else 65.0
-                    if self.progress_callback:
-                        self.progress_callback(progress_pct, f"Packing assets... ({self.pack_all_index + 1}/{len(self.to_remap)})")
+                    self._progress(progress_pct, f"Packing assets... ({self.pack_all_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.pack_all_index + 1}/{len(self.to_remap)}] Packing all in: {blend_to_fix.name}")
-                    t_blend = time.perf_counter()
                     unpacked = pack_all_in_blend(blend_to_fix, pack_root=self.target_path)
                     if unpacked:
                         self.missing_files_all.extend(unpacked)
-                    _pack_diag(f"pack_all {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s unpacked={len(unpacked or [])}", verbose_only=True)
+                    _pack_diag(
+                        f"pack_all {blend_to_fix.name}: {time.perf_counter() - t0:.2f}s unpacked={len(unpacked or [])}",
+                        verbose_only=True,
+                    )
                 self.pack_all_index += 1
+                units_this_tick += 1
+                if self._unit_took_too_long("pack_all", blend_to_fix.name, t0):
+                    break
+            if self.pack_all_index < len(self.to_remap):
                 return ('PACK_ALL', False)
-            else:
-                print(f"[BBP Pack] Finished packing all assets")
-                if self.run_pack_linked:
-                    self.pack_linked_index = 0
-                    self.phase = 'PACK_LINKED'
-                    return ('PACK_LINKED', False)
-                else:
-                    self.phase = 'COMPLETE'
-                    return ('COMPLETE', False)
+            print(f"[BBP Pack] Finished packing all assets")
+            if self.run_pack_linked:
+                self.pack_linked_index = 0
+                self.phase = 'PACK_LINKED'
+                return ('PACK_LINKED', False)
+            self.phase = 'COMPLETE'
+            return ('COMPLETE', False)
         
         elif self.phase == 'PACK_LINKED':
             if self.pack_linked_index == 0:
                 print(f"[BBP Pack] Packing linked libraries...")
-                if self.progress_callback:
-                    self.progress_callback(80.0, "Packing linked libraries...")
+                self._progress(80.0, "Packing linked libraries...")
                 # Bottom-up: dependencies first, top-level last so it embeds already-packed children.
                 if self.top_level_target_blend and self.to_remap:
                     try:
@@ -2138,18 +2185,18 @@ class IncrementalPacker:
                             f"pack_linked order: {len(rest)} deps then top-level {[p.name for p in tops]}",
                             verbose_only=True,
                         )
-            
-            # Process one blend file per batch
-            if self.pack_linked_index < len(self.to_remap):
+            units_this_tick = 0
+            while self.pack_linked_index < len(self.to_remap) and units_this_tick < batch_size:
+                if self.cancel_check and self.cancel_check():
+                    raise InterruptedError("Packing cancelled by user")
                 blend_to_fix = self.to_remap[self.pack_linked_index]
+                t0 = time.perf_counter()
                 if blend_to_fix.exists():
                     progress_pct = 80.0 + ((self.pack_linked_index + 1) / len(self.to_remap) * 15.0) if self.to_remap else 80.0
-                    if self.progress_callback:
-                        self.progress_callback(progress_pct, f"Packing linked... ({self.pack_linked_index + 1}/{len(self.to_remap)})")
+                    self._progress(progress_pct, f"Packing linked... ({self.pack_linked_index + 1}/{len(self.to_remap)})")
                     print(f"[BBP Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
                     print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
                     try:
-                        t_blend = time.perf_counter()
                         missing_files, oversized_files = pack_linked_in_blend(
                             blend_to_fix,
                             max_size_bytes=self.max_size_bytes,
@@ -2157,14 +2204,12 @@ class IncrementalPacker:
                             search_roots=self.search_roots,
                         )
                         _pack_diag(
-                            f"pack_linked {blend_to_fix.name}: {time.perf_counter() - t_blend:.2f}s "
+                            f"pack_linked {blend_to_fix.name}: {time.perf_counter() - t0:.2f}s "
                             f"missing={len(missing_files or [])} oversized={len(oversized_files or [])}",
                             verbose_only=True,
                         )
-                        # Collect missing textures/fonts/libs for a hard abort after all blends
                         if missing_files:
                             self.missing_files_all.extend(missing_files)
-                        # Track oversized files for user reporting
                         if oversized_files:
                             self.oversized_files_all.extend(oversized_files)
                         issues = []
@@ -2180,15 +2225,18 @@ class IncrementalPacker:
                         print(f"[BBP Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
                         import traceback
                         traceback.print_exc()
-                        # Continue with next file; missing-file abort happens after the full pass
                 else:
                     print(f"[BBP Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
                 self.pack_linked_index += 1
+                units_this_tick += 1
+                # Subprocess units are almost always hang-threshold; yield so UI can name the blend.
+                if self._unit_took_too_long("pack_linked", blend_to_fix.name, t0):
+                    break
+            if self.pack_linked_index < len(self.to_remap):
                 return ('PACK_LINKED', False)
-            else:
-                print(f"[BBP Pack] Finished packing linked libraries")
-                self.phase = 'COMPLETE'
-                return ('COMPLETE', False)
+            print(f"[BBP Pack] Finished packing linked libraries")
+            self.phase = 'COMPLETE'
+            return ('COMPLETE', False)
         
         elif self.phase == 'COMPLETE':
             print(f"[BBP Pack] Pack process completed successfully!")
@@ -2817,7 +2865,8 @@ class BBP_OT_pack_zip(Operator):
                     # Handle all packing sub-phases using IncrementalPacker
                     try:
                         # Process one batch
-                        next_phase, is_complete = self._packer.process_batch(batch_size=20)
+                        # Unbounded tick + hang-threshold yield (Atomic scanner pattern).
+                        next_phase, is_complete = self._packer.process_batch()
                         
                         if is_complete:
                             # Packing is complete
@@ -3383,7 +3432,8 @@ class BBP_OT_pack_blend(Operator):
                     # Handle all packing sub-phases using IncrementalPacker
                     try:
                         # Process one batch
-                        next_phase, is_complete = self._packer.process_batch(batch_size=20)
+                        # Unbounded tick + hang-threshold yield (Atomic scanner pattern).
+                        next_phase, is_complete = self._packer.process_batch()
                         
                         if is_complete:
                             # Packing is complete
@@ -3737,7 +3787,7 @@ class BBP_OT_pack_zip_sync(Operator):
         )
         try:
             while True:
-                next_phase, is_complete = packer.process_batch(batch_size=20)
+                next_phase, is_complete = packer.process_batch()
                 if is_complete:
                     break
             target_path = packer.target_path
