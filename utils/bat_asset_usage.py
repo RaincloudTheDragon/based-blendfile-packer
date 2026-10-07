@@ -11,7 +11,7 @@ Both wheels ship under ``wheels/`` and are loaded at runtime (Flamenco-style), n
 
 Packed datablocks are filtered locally so their filepaths are not copied or treated as missing:
 
-- Classic ``packed_file`` (images/fonts/libs/…).
+- Classic ``packed_file`` (images/fonts/libs/…), but if any unpacked datablock still needs that path, it stays in the copy set (packed-in-one-lib / unpacked-in-another).
 - Blender 5.0+ pack-linked IDs (``ID.is_linked_packed``) stored in archive libraries (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon. Any ID type can be pack-linked (node groups, materials, objects, …); the library filepath is only an origin marker and may be dead while data lives in this .blend. ``report_missing_files`` / ``file_path_foreach`` still emit those paths (same class of false positive as for Essentials).
 
 Session fonts (``bpy.data.fonts``) are always merged into ``find()`` when unpacked and on disk — BAT often omits ``.ttf``/``.otf`` (especially under Windows Fonts).
@@ -390,12 +390,42 @@ def _packed_nonlibrary_paths() -> set[Path]:
     return packed
 
 
+def _unpacked_nonlibrary_paths() -> set[Path]:
+    """Paths still needed on disk by at least one unpacked image/font/sound/text/etc."""
+    needed: set[Path] = set()
+    collections = [
+        bpy.data.images,
+        bpy.data.fonts,
+        bpy.data.sounds,
+        getattr(bpy.data, "movieclips", []),
+        getattr(bpy.data, "volumes", []),
+        bpy.data.texts,
+    ]
+    for coll in collections:
+        try:
+            items = list(coll)
+        except Exception:
+            continue
+        for item in items:
+            if getattr(item, "packed_file", None) is not None or _id_is_linked_packed(item):
+                continue
+            filepath = getattr(item, "filepath", None) or ""
+            if not filepath or filepath in ("", "<builtin>", "<memory>"):
+                continue
+            needed.update(_path_variants(filepath))
+    return needed
+
+
 def _filter_packed_usages(
     usages: dict[Library | None, set[AssetUsage]],
 ) -> dict[Library | None, set[AssetUsage]]:
-    """Drop usages whose abspath matches a packed / pack-linked / archive library."""
+    """Drop usages whose abspath matches a packed / pack-linked / archive library.
+
+    Keep a path when any unpacked datablock still references it (e.g. font packed in one lib, unpacked in the hero).
+    """
     embedded_paths, embedded_names = _embedded_library_index()
     packed_assets = _packed_nonlibrary_paths()
+    unpacked_needed = _unpacked_nonlibrary_paths()
 
     filtered: dict[Library | None, set[AssetUsage]] = defaultdict(set)
     skipped = 0
@@ -418,7 +448,9 @@ def _filter_packed_usages(
             if path in embedded_paths or resolved in embedded_paths:
                 skipped += 1
                 continue
-            if path in packed_assets or resolved in packed_assets:
+            # Packed elsewhere is not enough to skip if an unpacked ID still needs the file on disk.
+            still_needed = path in unpacked_needed or resolved in unpacked_needed
+            if (path in packed_assets or resolved in packed_assets) and not still_needed:
                 skipped += 1
                 continue
             filtered[lib].add(item)
