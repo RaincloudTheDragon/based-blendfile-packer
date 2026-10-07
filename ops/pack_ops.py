@@ -2819,21 +2819,12 @@ class BBP_OT_pack_zip(Operator):
                     
                     from .export_ops import apply_frame_range_to_blend
                     
-                    # Apply frame range only to the target (top-level) blend, not dependent blends
+                    # Apply frame range only to the target (top-level) blend, not dependent blends.
+                    # ZIP/copy-only must not seal via pack_linked — that embeds libraries into the hero.
                     target_blend = self._packer.top_level_target_blend if self._packer else None
                     if target_blend and target_blend.exists():
                         _pack_debug(f"Applying frame range to target blend: {target_blend.name}")
                         apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
-                        # Frame-range save can resurrect ghost Library stubs; re-seal pack_libraries/texts.
-                        print(f"[BBP Pack] Sealing packed blend after frame range: {target_blend.name}")
-                        seal_missing, _seal_over = pack_linked_in_blend(
-                            target_blend,
-                            max_size_bytes=_get_project_size_limit_bytes(context),
-                            pack_root=self._target_path or target_blend.parent,
-                            search_roots=getattr(self._packer, "search_roots", None) or [],
-                        )
-                        if seal_missing and self._packer:
-                            self._packer.missing_files_all.extend(seal_missing)
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
                                 area.tag_redraw()
