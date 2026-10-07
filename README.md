@@ -41,8 +41,8 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 1. **Set Frame Range**: In the Output properties panel, configure your frame range (full range or custom)
 2. **Pack Project**: Choose your packing method:
-   - **Pack as ZIP**: Copies the hero and dependents into a pack tree with remapped paths, then zips it. Libraries stay as external `.blend` files in the archive (not packed into the hero). Recommended for scenes with caches.
-   - **Pack as Blend**: Remaps paths, then packs assets and linked libraries into the hero blend for a single-file handoff.
+   - **Pack as ZIP**: Copies the hero and dependents into a pack tree with remapped paths, then zips it. Libraries stay as external `.blend` files in the archive (not packed into the hero). Recommended for scenes with caches, and when a farm’s missing-file check does not understand packed linked libraries.
+   - **Pack as Blend**: Remaps paths, then packs assets and linked libraries into the hero blend for a single-blendfile handoff. Some external render farms may report those libraries as missing because their scanners may not count packed linked libraries — if that happens, use **Pack as ZIP** instead.
 3. **Select Output Location**: A file browser will open to select where to save the packed file
 4. **Hand off**: Upload or transfer the packed output to your render farm or pipeline of choice
 
