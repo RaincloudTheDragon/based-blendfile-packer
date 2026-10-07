@@ -705,6 +705,80 @@ def recover_stale_path(
     return None
 
 
+def _iter_session_point_caches():
+    """Yield PointCache blocks from the open session (cloth, soft body, particles, dynamic paint, rigid body)."""
+    for obj in bpy.data.objects:
+        for mod in getattr(obj, "modifiers", []) or []:
+            ps = getattr(mod, "particle_system", None)
+            if ps is not None:
+                pc = getattr(ps, "point_cache", None)
+                if pc is not None:
+                    yield pc
+            pc = getattr(mod, "point_cache", None)
+            if pc is not None:
+                yield pc
+            if getattr(mod, "type", "") == "DYNAMIC_PAINT":
+                canvas = getattr(mod, "canvas_settings", None)
+                for surf in getattr(canvas, "canvas_surfaces", None) or []:
+                    pc = getattr(surf, "point_cache", None)
+                    if pc is not None:
+                        yield pc
+    for scene in bpy.data.scenes:
+        rbw = getattr(scene, "rigidbody_world", None)
+        if rbw is None:
+            continue
+        pc = getattr(rbw, "point_cache", None)
+        if pc is not None:
+            yield pc
+
+
+def _session_expects_blendcache(src_blend: Path) -> bool:
+    """True when open-session sims use a disk cache that targets ``blendcache_<stem>`` for *src_blend*.
+
+    Default disk caches (empty filepath + ``use_disk_cache``) live next to the .blend. External filepaths are matched when they resolve to that folder. Only consulted when the open file stem matches *src_blend* (hero / temp export); closed nested blends are not probed.
+    """
+    try:
+        stem = src_blend.stem
+        expected_name = f"blendcache_{stem}"
+        expected = (src_blend.parent / expected_name)
+    except Exception:
+        return False
+    try:
+        open_fp = bpy.data.filepath or ""
+        if not open_fp or Path(open_fp).stem != stem:
+            return False
+    except Exception:
+        return False
+    try:
+        expected_resolved = expected.resolve()
+    except Exception:
+        expected_resolved = expected
+    for pc in _iter_session_point_caches():
+        use_disk = bool(getattr(pc, "use_disk_cache", False))
+        use_ext = bool(getattr(pc, "use_external", False))
+        if not use_disk and not use_ext:
+            continue
+        fp = getattr(pc, "filepath", None) or ""
+        if not fp or fp == "//":
+            # Blender's default disk-cache dir for this .blend.
+            if use_disk:
+                return True
+            continue
+        try:
+            abs_fp = Path(bpy.path.abspath(fp))
+            try:
+                resolved = abs_fp.resolve()
+            except Exception:
+                resolved = abs_fp
+            if resolved == expected_resolved or resolved.name == expected_name:
+                return True
+            if expected_name in {p.name for p in resolved.parents}:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list, 
                       frame_start: Optional[int] = None, frame_end: Optional[int] = None, 
                       frame_step: Optional[int] = None,
@@ -776,10 +850,14 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
         src_parent = src_blend.parent
         dst_parent = dst_blend.parent
         blendname = src_blend.stem
-        candidates = [
-            (src_parent / f"blendcache_{blendname}", dst_parent / f"blendcache_{blendname}"),
-        ]
-        # Only add bakes if it exists in the source (avoid creating empty bakes/ in pack)
+        # Existing cache dirs only. Missing blendcache_ is reported separately when hero sims expect it.
+        candidates: list[tuple[Path, Path]] = []
+        blendcache_src = src_parent / f"blendcache_{blendname}"
+        if blendcache_src.exists() and blendcache_src.is_dir():
+            candidates.append((blendcache_src, dst_parent / f"blendcache_{blendname}"))
+        elif _session_expects_blendcache(src_blend):
+            missing_on_copy.append(blendcache_src)
+            print(f"[BBP Pack]   WARNING: Expected blendcache missing (disk-cache sims present): {blendcache_src}")
         bakes_src = src_parent / "bakes" / blendname
         if bakes_src.exists() and bakes_src.is_dir():
             candidates.append((bakes_src, dst_parent / "bakes" / blendname))
@@ -795,12 +873,14 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                 copy_map_out[_norm_copy_map_key(sdir)] = str(ddir.resolve())
 
         for src_dir, dst_dir in candidates:
-            if os.name == "nt":
-                src_dir = src_dir  # keep as P:\ form, do not resolve to UNC
-            else:
+            # Keep Windows drive letters (e.g. A:\) — resolve can turn them into UNC and break robocopy.
+            if os.name != "nt":
                 src_dir = src_dir.resolve()
             dst_dir = dst_dir.resolve()
             try:
+                # Candidates are existence-gated above; skip if the dir vanished mid-pack.
+                if not src_dir.exists() or not src_dir.is_dir():
+                    continue
                 # On Windows with frame filter: try Python copy first; if 0 files or PermissionError, use robocopy
                 if filter_by_frame and os.name == "nt":
                     def _try_robocopy():
@@ -823,14 +903,11 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                     dst_dir.mkdir(parents=True, exist_ok=True)
                     used_robocopy = False
                     try:
-                        src_exists = src_dir.exists()
-                        src_count = "n/a"
-                        if src_exists:
-                            try:
-                                src_count = sum(1 for _ in src_dir.rglob("*"))
-                            except Exception:
-                                src_count = "?"
-                        print(f"[BBP Pack]   {src_dir.name}: exists={src_exists}, items={src_count}")
+                        try:
+                            src_count = sum(1 for _ in src_dir.rglob("*"))
+                        except Exception:
+                            src_count = "?"
+                        print(f"[BBP Pack]   {src_dir.name}: exists=True, items={src_count}")
                         copy_tree_filtered(src_dir, dst_dir)
                     except PermissionError:
                         used_robocopy = True
@@ -880,8 +957,6 @@ def copy_blend_caches(src_blend: Path, dst_blend: Path, missing_on_copy: list,
                                 shutil.rmtree(dst_dir)
                             except Exception:
                                 pass
-                    continue
-                if not src_dir.exists() or not src_dir.is_dir():
                     continue
                 # Don't pre-create dst_dir for non-Windows path; copy_tree/copytree will create it
                 dst_dir.parent.mkdir(parents=True, exist_ok=True)
