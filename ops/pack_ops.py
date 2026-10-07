@@ -1310,10 +1310,10 @@ def pack_all_in_blend(blend_path: Path, pack_root: Optional[Path] = None) -> lis
 
 def _collect_pack_tree_blends(
     target_path: Path,
-    top_level: Optional[Path],
+    hero: Optional[Path],
     copy_map: dict,
 ) -> list[Path]:
-    """Every .blend copied into the pack tree — deps first, top-level last.
+    """Every .blend copied into the pack tree — deps first, hero last.
 
     BAT's find_blend_asset_usage() only sees session-visible links; prop/rig libs (and their textures) still need remap+pack_all before pack_libraries embeds them.
     """
@@ -1334,8 +1334,8 @@ def _collect_pack_tree_blends(
 
     for dest in (copy_map or {}).values():
         _add(Path(dest))
-    if top_level:
-        _add(Path(top_level))
+    if hero:
+        _add(Path(hero))
     try:
         for p in target_path.rglob("*.blend"):
             # Skip localized staging copies — real libs live under DRIVE_*/UNC_*.
@@ -1345,12 +1345,12 @@ def _collect_pack_tree_blends(
     except OSError as e:
         _pack_diag(f"pack-tree blend scan failed: {e}")
 
-    top_key = _norm_copy_map_key(top_level) if top_level else None
-    deps = [p for p in blends if _norm_copy_map_key(p) != top_key]
+    hero_key = _norm_copy_map_key(hero) if hero else None
+    deps = [p for p in blends if _norm_copy_map_key(p) != hero_key]
     # Deeper paths first (nested asset libs before scenes that link them).
     deps.sort(key=lambda p: (-len(p.parts), str(p).lower()))
-    tops = [p for p in blends if _norm_copy_map_key(p) == top_key]
-    return deps + tops
+    heroes = [p for p in blends if _norm_copy_map_key(p) == hero_key]
+    return deps + heroes
 
 
 def _get_project_size_limit_bytes(context=None):
@@ -1376,7 +1376,7 @@ def pack_linked_in_blend(
 ) -> tuple[list[Path], list[Path]]:
     """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
 
-    Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the top-level blend stays hollow (~source size) while the ZIP still holds the trees.
+    Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the hero blend stays hollow (~source size) while the ZIP still holds the trees.
 
     Returns:
         Tuple of (missing_files, oversized_files)
@@ -1554,7 +1554,7 @@ class IncrementalPacker:
         
         # Asset finding state
         self.asset_usages = None
-        self.top_level_blend_abs = None
+        self.hero_abs = None  # Source hero path (open session / temp export)
         self.all_filepaths = []
         self.common_root = None
         
@@ -1564,7 +1564,7 @@ class IncrementalPacker:
         self.missing_on_copy = []
         self.assets_to_copy = []  # List of (asset_usage, target_path, common_root) tuples
         self.assets_copied = 0
-        self.top_level_target_blend = None
+        self.hero_blend = None  # Hero copy inside the pack tree
         self.cache_dirs = []  # List of cache directories to truncate
         # Stale-path recovery: session-derived roots + basename→hits cache
         self.search_roots: list[Path] = []
@@ -1673,9 +1673,9 @@ class IncrementalPacker:
             t_find = time.perf_counter()
             self.asset_usages = au.find()
             _pack_diag(f"au.find() took {time.perf_counter() - t_find:.2f}s")
-            self.top_level_blend_abs = au.library_abspath(None).resolve()
+            self.hero_abs = au.library_abspath(None).resolve()
             print(f"[BBP Pack] Found {len(self.asset_usages)} libraries with assets")
-            print(f"[BBP Pack] Top-level blend: {self.top_level_blend_abs}")
+            print(f"[BBP Pack] Hero blend: {self.hero_abs}")
             _diag_summarize_asset_usages(self.asset_usages)
             _diag_session_udim_gap(self.asset_usages)
             self.phase = 'COLLECT_PATHS'
@@ -1728,11 +1728,11 @@ class IncrementalPacker:
             return ('PREPARE_COPY_TOP_BLEND', False)
         
         elif self.phase == 'PREPARE_COPY_TOP_BLEND':
-            print(f"[BBP Pack] Copying top-level blend file...")
+            print(f"[BBP Pack] Copying hero blend...")
             if self.progress_callback:
-                self.progress_callback(15.0, "Copying top-level blend file...")
+                self.progress_callback(15.0, "Copying hero blend...")
             
-            current_blend_abspath = self.top_level_blend_abs
+            current_blend_abspath = self.hero_abs
             
             # If this is a temp file, copy it directly to target root with just its filename. This avoids the DRIVE_C path structure issue
             is_temp_file = (self.temp_blend_path and 
@@ -1760,7 +1760,7 @@ class IncrementalPacker:
                     self.copied_paths.add(current_blend_resolved)
                     if current_blend_abspath.suffix.lower() == ".blend":
                         self.copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
-                    self.top_level_target_blend = target_path_file.resolve()
+                    self.hero_blend = target_path_file.resolve()
                     print(f"[BBP Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
                     # Copy caches - use original blend path for cache lookup if temp file
                     cache_source_blend = self.original_blend_path if (is_temp_file and self.original_blend_path) else current_blend_abspath
@@ -1783,7 +1783,7 @@ class IncrementalPacker:
                         self.cache_dirs.extend(copied_cache_dirs)
                         print(f"[BBP Pack]   Copied {len(copied_cache_dirs)} cache directories")
                 except Exception as e:
-                    print(f"[BBP Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
+                    print(f"[BBP Pack]   ERROR copying hero blend: {type(e).__name__}: {str(e)}")
                     self.missing_on_copy.append(current_blend_abspath)
             
             # Prepare asset copy list (dedupe by resolved path so each file copied once)
@@ -1820,7 +1820,7 @@ class IncrementalPacker:
                 for a in links
                 if a.abspath.exists()
             ]
-            blend_parent = self.top_level_blend_abs.parent if self.top_level_blend_abs else None
+            blend_parent = self.hero_abs.parent if self.hero_abs else None
             self.search_roots = collect_search_roots(self.common_root, existing_for_roots, blend_parent)
             self._recovery_cache = {}
             print(f"[BBP Pack] Stale-path search roots: {len(self.search_roots)}")
@@ -1983,7 +1983,7 @@ class IncrementalPacker:
             # Keep BAT map for diagnostics; process every .blend we copied (not just session-visible links).
             self.blend_deps = au.find_blend_asset_usage()
             self.to_remap = _collect_pack_tree_blends(
-                self.target_path, self.top_level_target_blend, self.copy_map
+                self.target_path, self.hero_blend, self.copy_map
             )
             for p in self.to_remap:
                 try:
@@ -2082,23 +2082,23 @@ class IncrementalPacker:
             if self.pack_linked_index == 0:
                 print(f"[BBP Pack] Packing linked libraries...")
                 self._progress(80.0, "Packing linked libraries...")
-                # Bottom-up: dependencies first, top-level last so it embeds already-packed children.
-                if self.top_level_target_blend and self.to_remap:
+                # Bottom-up: dependencies first, hero last so it embeds already-packed children.
+                if self.hero_blend and self.to_remap:
                     try:
-                        top_key = self.top_level_target_blend.resolve()
+                        hero_key = self.hero_blend.resolve()
                     except OSError:
-                        top_key = Path(self.top_level_target_blend)
-                    rest, tops = [], []
+                        hero_key = Path(self.hero_blend)
+                    rest, heroes = [], []
                     for p in self.to_remap:
                         try:
                             key = Path(p).resolve()
                         except OSError:
                             key = Path(p)
-                        (tops if key == top_key else rest).append(p)
-                    if tops:
-                        self.to_remap = rest + tops
+                        (heroes if key == hero_key else rest).append(p)
+                    if heroes:
+                        self.to_remap = rest + heroes
                         _pack_diag(
-                            f"pack_linked order: {len(rest)} deps then top-level {[p.name for p in tops]}",
+                            f"pack_linked order: {len(rest)} deps then hero {[p.name for p in heroes]}",
                             verbose_only=True,
                         )
             units_this_tick = 0
@@ -2175,9 +2175,9 @@ class IncrementalPacker:
                 # For copy-only, we'll create ZIP later in the operator
                 self.file_path = None
             else:
-                # For pack-and-save, return the main target blend file
-                if self.top_level_target_blend and self.top_level_target_blend.exists():
-                    self.file_path = self.top_level_target_blend
+                # For pack-and-save, return the hero blend
+                if self.hero_blend and self.hero_blend.exists():
+                    self.file_path = self.hero_blend
                     print(f"[BBP Pack] Target blend file for submission: {self.file_path}")
                 else:
                     # Fallback: find the first .blend file in target_path
@@ -2244,9 +2244,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
     t_find = time.perf_counter()
     asset_usages = au.find()
     _pack_diag(f"au.find() took {time.perf_counter() - t_find:.2f}s")
-    top_level_blend_abs = au.library_abspath(None).resolve()
+    hero_abs = au.library_abspath(None).resolve()
     print(f"[BBP Pack] Found {len(asset_usages)} libraries with assets")
-    print(f"[BBP Pack] Top-level blend: {top_level_blend_abs}")
+    print(f"[BBP Pack] Hero blend: {hero_abs}")
     _diag_summarize_asset_usages(asset_usages)
     _diag_session_udim_gap(asset_usages)
     
@@ -2297,9 +2297,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
     copy_map = {}
     missing_on_copy = []
     
-    # Copy top-level blend
-    print(f"[BBP Pack] Copying top-level blend file...")
-    current_blend_abspath = top_level_blend_abs
+    # Copy hero blend
+    print(f"[BBP Pack] Copying hero blend...")
+    current_blend_abspath = hero_abs
     try:
         current_relpath = current_blend_abspath.relative_to(common_root)
         print(f"[BBP Pack]   Relative path: {current_relpath}")
@@ -2307,7 +2307,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
         current_relpath = compute_target_relpath(current_blend_abspath, common_root)
         print(f"[BBP Pack]   Computed relative path: {current_relpath}")
     
-    top_level_target_blend = None
+    hero_blend = None
     current_blend_resolved = current_blend_abspath.resolve()
     if current_blend_resolved not in copied_paths:
         target_path_file = target_path / current_relpath
@@ -2318,7 +2318,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
             copied_paths.add(current_blend_resolved)
             if current_blend_abspath.suffix.lower() == ".blend":
                 copy_map[_norm_copy_map_key(current_blend_resolved)] = str(target_path_file.resolve())
-            top_level_target_blend = target_path_file.resolve()
+            hero_blend = target_path_file.resolve()
             print(f"[BBP Pack]   Copied successfully, size: {target_path_file.stat().st_size} bytes")
             # Copy caches
             print(f"[BBP Pack]   Copying blend caches...")
@@ -2328,7 +2328,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
                                           copy_map_out=copy_map)
             print(f"[BBP Pack]   Copied {cache_count} cache directories")
         except Exception as e:
-            print(f"[BBP Pack]   ERROR copying top-level blend: {type(e).__name__}: {str(e)}")
+            print(f"[BBP Pack]   ERROR copying hero blend: {type(e).__name__}: {str(e)}")
             missing_on_copy.append(current_blend_abspath)
     
     # Copy other assets
@@ -2340,7 +2340,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
         for a in links
         if a.abspath.exists()
     ]
-    search_roots = collect_search_roots(common_root, existing_for_roots, top_level_blend_abs.parent if top_level_blend_abs else None)
+    search_roots = collect_search_roots(common_root, existing_for_roots, hero_abs.parent if hero_abs else None)
     recovery_cache: dict = {}
     recovery_hits = 0
     recovery_misses = 0
@@ -2436,7 +2436,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
     if cancel_check and cancel_check():
         raise InterruptedError("Packing cancelled by user")
     blend_deps = au.find_blend_asset_usage()
-    to_remap = _collect_pack_tree_blends(target_path, top_level_target_blend, copy_map)
+    to_remap = _collect_pack_tree_blends(target_path, hero_blend, copy_map)
     print(f"[BBP Pack] Found {len(to_remap)} blend files to process (full pack tree; BAT groups={len(blend_deps)})")
     
     # Remap library paths
@@ -2483,21 +2483,21 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
             print(f"[BBP Pack] Packing linked libraries...")
             if progress_callback:
                 progress_callback(80.0, "Packing linked libraries...")
-            # Bottom-up: deps first, top-level last.
-            if top_level_target_blend and to_remap:
+            # Bottom-up: deps first, hero last.
+            if hero_blend and to_remap:
                 try:
-                    top_key = top_level_target_blend.resolve()
+                    hero_key = hero_blend.resolve()
                 except OSError:
-                    top_key = Path(top_level_target_blend)
-                rest, tops = [], []
+                    hero_key = Path(hero_blend)
+                rest, heroes = [], []
                 for p in to_remap:
                     try:
                         key = Path(p).resolve()
                     except OSError:
                         key = Path(p)
-                    (tops if key == top_key else rest).append(p)
-                if tops:
-                    to_remap = rest + tops
+                    (heroes if key == hero_key else rest).append(p)
+                if heroes:
+                    to_remap = rest + heroes
             missing_files_all = []
             for i, blend_to_fix in enumerate(to_remap, 1):
                 if cancel_check and cancel_check():
@@ -2536,9 +2536,9 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
         # For copy-only, we'll create ZIP later in the operator. Return None here, ZIP will be created in operator
         pass
     else:
-        # For pack-and-save, return the main target blend file
-        if top_level_target_blend and top_level_target_blend.exists():
-            file_path = top_level_target_blend
+        # For pack-and-save, return the hero blend
+        if hero_blend and hero_blend.exists():
+            file_path = hero_blend
             print(f"[BBP Pack] Target blend file for submission: {file_path}")
         else:
             # Fallback: find the first .blend file in target_path
@@ -2789,8 +2789,8 @@ class BBP_OT_pack_zip(Operator):
                                 # Report as warning (non-blocking)
                                 self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
-                            self._phase = 'APPLYING_FRAME_RANGE_TO_PACKED'
-                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_PACKED phase")
+                            self._phase = 'APPLYING_FRAME_RANGE_TO_HERO'
+                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_HERO phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
@@ -2812,24 +2812,24 @@ class BBP_OT_pack_zip(Operator):
                         self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
                 
-                elif self._phase == 'APPLYING_FRAME_RANGE_TO_PACKED':
-                    _pack_debug(f"Entering APPLYING_FRAME_RANGE_TO_PACKED phase")
+                elif self._phase == 'APPLYING_FRAME_RANGE_TO_HERO':
+                    _pack_debug(f"Entering APPLYING_FRAME_RANGE_TO_HERO phase")
                     pack_settings.pack_progress = 60.0
-                    pack_settings.pack_status_message = "Applying frame range to target blend..."
+                    pack_settings.pack_status_message = "Applying frame range to hero blend..."
                     
                     from .export_ops import apply_frame_range_to_blend
                     
-                    # Apply frame range only to the target (top-level) blend, not dependent blends.
+                    # Apply frame range only to the hero blend, not dependent blends.
                     # ZIP/copy-only must not seal via pack_linked — that embeds libraries into the hero.
-                    target_blend = self._packer.top_level_target_blend if self._packer else None
-                    if target_blend and target_blend.exists():
-                        _pack_debug(f"Applying frame range to target blend: {target_blend.name}")
-                        apply_frame_range_to_blend(target_blend, self._frame_start, self._frame_end, self._frame_step)
+                    hero_blend = self._packer.hero_blend if self._packer else None
+                    if hero_blend and hero_blend.exists():
+                        _pack_debug(f"Applying frame range to hero blend: {hero_blend.name}")
+                        apply_frame_range_to_blend(hero_blend, self._frame_start, self._frame_end, self._frame_step)
                         for area in context.screen.areas:
                             if area.type == 'PROPERTIES':
                                 area.tag_redraw()
                     else:
-                        _pack_debug(f"No target blend to apply frame range to")
+                        _pack_debug(f"No hero blend to apply frame range to")
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
                     _pack_debug(f"Transitioning to RESTORING_LIBRARY_ABSPATH phase")
@@ -3348,13 +3348,13 @@ class BBP_OT_pack_blend(Operator):
                                 self.report({'WARNING'}, f"{len(self._packer.oversized_files_all)} linked file(s) over size limit could not be packed")
                             
                             if not self._blend_path or not self._blend_path.exists():
-                                self._error = "Could not find target blend file for submission."
+                                self._error = "Could not find hero blend for submission."
                                 self._cleanup(context, cancelled=True)
                                 self.report({'ERROR'}, self._error)
                                 return {'CANCELLED'}
                             
-                            self._phase = 'APPLYING_FRAME_RANGE_TO_TARGET'
-                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_TARGET phase")
+                            self._phase = 'APPLYING_FRAME_RANGE_TO_HERO'
+                            _pack_debug(f"Transitioning to APPLYING_FRAME_RANGE_TO_HERO phase")
                         else:
                             # Continue with next phase from packer (prepend PACKING_ prefix)
                             self._phase = f'PACKING_{next_phase}'
@@ -3376,14 +3376,14 @@ class BBP_OT_pack_blend(Operator):
                         self.report({'ERROR'}, self._error.split('\n')[0])
                         return {'CANCELLED'}
                 
-                elif self._phase == 'APPLYING_FRAME_RANGE_TO_TARGET':
+                elif self._phase == 'APPLYING_FRAME_RANGE_TO_HERO':
                     pack_settings.pack_progress = 70.0
-                    pack_settings.pack_status_message = "Applying frame range to target blend..."
+                    pack_settings.pack_status_message = "Applying frame range to hero blend..."
                     
                     from .export_ops import apply_frame_range_to_blend
                     
-                    # Apply frame range to the target blend file before submission
-                    print(f"[BBP Pack] Applying frame range to target blend file: {self._blend_path.name}")
+                    # Apply frame range to the hero blend before submission
+                    print(f"[BBP Pack] Applying frame range to hero blend: {self._blend_path.name}")
                     apply_frame_range_to_blend(self._blend_path, self._frame_start, self._frame_end, self._frame_step)
                     # Frame-range save can resurrect ghost Library stubs; re-seal pack_libraries/texts.
                     print(f"[BBP Pack] Sealing packed blend after frame range: {self._blend_path.name}")
@@ -3684,10 +3684,10 @@ class BBP_OT_pack_zip_sync(Operator):
             pack_settings.is_packing = False
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
-        # Apply frame range only to the target blend, not dependent blends
-        target_blend = packer.top_level_target_blend if packer else None
-        if target_blend and target_blend.exists():
-            apply_frame_range_to_blend(target_blend, frame_start, frame_end, frame_step)
+        # Apply frame range only to the hero blend, not dependent blends
+        hero_blend = packer.hero_blend if packer else None
+        if hero_blend and hero_blend.exists():
+            apply_frame_range_to_blend(hero_blend, frame_start, frame_end, frame_step)
         au.library_abspath.cache_clear()
         au.library_abspath = _orig_lib_abspath
         zip_path = target_path.parent / f"{target_path.name}.zip"
