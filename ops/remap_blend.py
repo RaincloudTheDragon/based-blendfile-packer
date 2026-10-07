@@ -1,4 +1,4 @@
-"""Headless Blender entrypoint: remap library/image/text/cache paths after pack copy.
+"""Headless Blender entrypoint: remap library/image/font/text/cache paths after pack copy.
 
 Invoked by pack_ops as: blender -b <blend> --python remap_blend.py -- <config.json>
 Config JSON keys: copy_map, search_roots, common_root, target_path, ensure_autopack.
@@ -296,6 +296,28 @@ def run_remap(config_path: Path) -> None:
                 except Exception:
                     images_remapped += 1
     print("Remapped", images_remapped, "image/texture paths")
+
+    # Remap font files (VFont) into the pack tree — includes Windows Fonts copies.
+    fonts_remapped = 0
+    for font in getattr(bpy.data, "fonts", []):
+        if getattr(font, "packed_file", None):
+            continue
+        src = getattr(font, "filepath", None) or ""
+        if not src or src in ("", "<builtin>", "<memory>"):
+            continue
+        if src.startswith("//"):
+            abs_src = soft_resolve(blend_dir / src[2:])
+        else:
+            abs_src = soft_resolve(src)
+        new_abs = resolve_new_abs(abs_src, copy_map_norm, common_root, target_path, search_roots, allow_recover=True)
+        if new_abs is not None and Path(new_abs).exists():
+            font.filepath = str(new_abs)
+            try:
+                font.filepath = bpy.path.relpath(str(new_abs))
+            except Exception:
+                pass
+            fonts_remapped += 1
+    print("Remapped", fonts_remapped, "font paths")
 
     # Remap external text scripts (e.g. handles.py) after stale-path recovery.
     texts_remapped = 0

@@ -14,6 +14,8 @@ Packed datablocks are filtered locally so their filepaths are not copied or trea
 - Classic ``packed_file`` (images/fonts/libs/…).
 - Blender 5.0+ pack-linked IDs (``ID.is_linked_packed``) stored in archive libraries (``Library.is_archive`` / ``archive_libraries``) — Outliner “box” icon. Any ID type can be pack-linked (node groups, materials, objects, …); the library filepath is only an origin marker and may be dead while data lives in this .blend. ``report_missing_files`` / ``file_path_foreach`` still emit those paths (same class of false positive as for Essentials).
 
+Session fonts (``bpy.data.fonts``) are always merged into ``find()`` when unpacked and on disk — BAT often omits ``.ttf``/``.otf`` (especially under Windows Fonts).
+
 Workaround until BAT/core skip pack-linked origin paths in tracing and missing-file reports.
 """
 
@@ -425,6 +427,35 @@ def _filter_packed_usages(
     return dict(filtered)
 
 
+def _session_font_asset_usage() -> dict[Library | None, set[AssetUsage]]:
+    """Unpacked fonts from the open session (BAT often misses Windows Fonts / linked VFont paths)."""
+    usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
+    for font in getattr(bpy.data, "fonts", []) or []:
+        if getattr(font, "packed_file", None) is not None or _id_is_linked_packed(font):
+            continue
+        lib = getattr(font, "library", None)
+        if _library_is_packed(lib):
+            continue
+        fp = getattr(font, "filepath", None) or ""
+        if not fp or fp in ("", "<builtin>", "<memory>"):
+            continue
+        try:
+            abs_fp = Path(bpy.path.abspath(fp))
+            resolved = abs_fp.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not resolved.is_file():
+            continue
+        usages[lib].add(
+            AssetUsage(
+                abspath=resolved,
+                reference_path=fp,
+                is_blendfile=False,
+            )
+        )
+    return dict(usages)
+
+
 def _repo_to_asset_usages(repo) -> dict[Library | None, set[AssetUsage]]:
     """Convert BAT v2 ``FileDependencyRepository`` to BBP's legacy grouping."""
     usages: dict[Library | None, set[AssetUsage]] = defaultdict(set)
@@ -564,7 +595,9 @@ def find_nonblend_asset_usage() -> dict[Library | None, set[AssetUsage]]:
 
 def find() -> dict[Library | None, set[AssetUsage]]:
     """Return all assets used by the current blend file and its linked libraries."""
-    return _merge_keys(find_blend_asset_usage(), find_nonblend_asset_usage())
+    merged = _merge_keys(find_blend_asset_usage(), find_nonblend_asset_usage())
+    # Session fonts: BAT tracing often omits .ttf/.otf (esp. C:\Windows\Fonts); still required for portable ZIP.
+    return _merge_keys(merged, _session_font_asset_usage())
 
 
 def _merge_keys(

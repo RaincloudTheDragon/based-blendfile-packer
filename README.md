@@ -14,7 +14,7 @@ A farm-agnostic Blender addon for packing projects with automatic asset discover
 
 | Path Remapping | Missing File Detection | Error Reporting |
 |--|--|--|
-| Intelligently remaps all asset paths for portable handoff to any render farm or pipeline. Handles textures, images, videos, and linked blend files. | Detects and reports missing linked files and oversized files that cannot be packed. | Comprehensive error messages with actionable suggestions for resolving issues. |
+| Intelligently remaps all asset paths for portable handoff to any render farm or pipeline. Handles textures, images, fonts, videos, and linked blend files. | Detects and reports missing linked files and oversized files that cannot be packed. | Comprehensive error messages with actionable suggestions for resolving issues. |
 
 ### Additional Features:
 - Works with unsaved blend files (operates on in-memory state)
