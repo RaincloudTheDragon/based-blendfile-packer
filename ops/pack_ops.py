@@ -5,12 +5,14 @@ Packing operations for BasedBlendfilePacker.
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import bpy
 from bpy.types import Operator
@@ -1143,20 +1145,12 @@ def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tu
         return "", str(e), -1
 
 
-def _run_blender_python_file(
+def _blender_python_cmd(
     script_path: Path,
     blend_path: Path,
     config_path: Optional[Path] = None,
-    timeout: int = 300,
-) -> tuple[str, str, int]:
-    """Run a .py file in a Blender subprocess: blender -b <blend> --python <script> [-- <config>]."""
-    import subprocess
-    import time
-    print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
-    print(f"[BBP Pack]   Full path: {blend_path}")
-    print(f"[BBP Pack]   Script file: {script_path.name}")
-    print(f"[BBP Pack]   Timeout: {timeout}s")
-    start_time = time.time()
+) -> list[str]:
+    """Build blender -b <blend> --python <script> [-- <config>] argv."""
     cmd = [
         "blender",
         "--factory-startup",
@@ -1167,27 +1161,171 @@ def _run_blender_python_file(
     ]
     if config_path is not None:
         cmd.extend(["--", str(config_path)])
+    return cmd
+
+
+@dataclass
+class _BlenderPythonJob:
+    """Non-blocking Blender --python subprocess with temp stdout/stderr files."""
+    blend_path: Path
+    proc: subprocess.Popen
+    t0: float
+    stdout_path: Path
+    stderr_path: Path
+    config_path: Optional[Path] = None
+    stdout_handle: Optional[object] = None
+    stderr_handle: Optional[object] = None
+    timed_out: bool = False
+    cancelled: bool = False
+
+
+def _kill_blender_job(job: _BlenderPythonJob) -> None:
+    """Kill Blender subprocess (process tree on Windows)."""
+    proc = job.proc
+    if proc.poll() is not None:
+        return
     try:
-        result = subprocess.run(
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            proc.kill()
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _close_job_handles(job: _BlenderPythonJob) -> None:
+    """Close stdout/stderr file handles opened for the job."""
+    for h in (job.stdout_handle, job.stderr_handle):
+        if h is None:
+            continue
+        try:
+            h.close()
+        except Exception:
+            pass
+    job.stdout_handle = None
+    job.stderr_handle = None
+
+
+def _cleanup_job_temps(job: _BlenderPythonJob) -> None:
+    """Remove temp config/stdout/stderr files for a finished job."""
+    _close_job_handles(job)
+    for p in (job.stdout_path, job.stderr_path, job.config_path):
+        if p is None:
+            continue
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _read_job_output(job: _BlenderPythonJob) -> tuple[str, str]:
+    """Read captured stdout/stderr text from temp files."""
+    _close_job_handles(job)
+    stdout = ""
+    stderr = ""
+    try:
+        stdout = job.stdout_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    try:
+        stderr = job.stderr_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    return stdout, stderr
+
+
+def _start_blender_python_file(
+    script_path: Path,
+    blend_path: Path,
+    config_path: Optional[Path] = None,
+) -> _BlenderPythonJob:
+    """Start blender -b --python as a Popen job (caller polls / kills)."""
+    print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
+    print(f"[BBP Pack]   Full path: {blend_path}")
+    print(f"[BBP Pack]   Script file: {script_path.name}")
+    cmd = _blender_python_cmd(script_path, blend_path, config_path=config_path)
+    out_f = tempfile.NamedTemporaryFile(mode="w", suffix=".bbp_out", delete=False, encoding="utf-8")
+    err_f = tempfile.NamedTemporaryFile(mode="w", suffix=".bbp_err", delete=False, encoding="utf-8")
+    stdout_path = Path(out_f.name)
+    stderr_path = Path(err_f.name)
+    try:
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=out_f,
+            stderr=err_f,
             text=True,
-            check=False,
-            timeout=timeout,
         )
-        elapsed = time.time() - start_time
-        print(f"[BBP Pack]   Script completed in {elapsed:.2f}s, return code: {result.returncode}")
-        _log_blender_subprocess_output(result.stdout or "", result.stderr or "")
-        return result.stdout, result.stderr, result.returncode
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start_time
-        print(f"[BBP Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s)")
-        print(f"[BBP Pack]   This may indicate the blend file has issues or is very large")
-        return "", f"Script timed out after {timeout} seconds", -1
+    except Exception:
+        out_f.close()
+        err_f.close()
+        try:
+            stdout_path.unlink(missing_ok=True)
+            stderr_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return _BlenderPythonJob(
+        blend_path=Path(blend_path),
+        proc=proc,
+        t0=time.time(),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        config_path=Path(config_path) if config_path is not None else None,
+        stdout_handle=out_f,
+        stderr_handle=err_f,
+    )
+
+
+def _poll_blender_python_job(
+    job: _BlenderPythonJob,
+    timeout: Optional[float] = None,
+) -> Optional[tuple[str, str, int]]:
+    """Poll a Popen job. Returns (stdout, stderr, returncode) when finished, else None. Kills on timeout."""
+    rc = job.proc.poll()
+    elapsed = time.time() - job.t0
+    if rc is None:
+        if timeout is not None and elapsed >= float(timeout):
+            job.timed_out = True
+            print(f"[BBP Pack]   ERROR: Script timed out after {elapsed:.2f}s (timeout: {timeout}s) — killing {job.blend_path.name}")
+            print(f"[BBP Pack]   This may indicate the blend file has issues or is very large")
+            _kill_blender_job(job)
+            stdout, stderr = _read_job_output(job)
+            _cleanup_job_temps(job)
+            return stdout, (stderr or "") + f"\nScript timed out after {timeout} seconds", -1
+        return None
+    stdout, stderr = _read_job_output(job)
+    _cleanup_job_temps(job)
+    print(f"[BBP Pack]   Script completed in {elapsed:.2f}s, return code: {rc}")
+    _log_blender_subprocess_output(stdout or "", stderr or "")
+    return stdout, stderr, int(rc)
+
+
+def _run_blender_python_file(
+    script_path: Path,
+    blend_path: Path,
+    config_path: Optional[Path] = None,
+    timeout: int = 300,
+) -> tuple[str, str, int]:
+    """Run a .py file in a Blender subprocess: blender -b <blend> --python <script> [-- <config>]."""
+    print(f"[BBP Pack]   Timeout: {timeout}s")
+    try:
+        job = _start_blender_python_file(script_path, blend_path, config_path=config_path)
     except Exception as e:
-        elapsed = time.time() - start_time
-        print(f"[BBP Pack]   ERROR: Script failed after {elapsed:.2f}s: {type(e).__name__}: {str(e)}")
+        print(f"[BBP Pack]   ERROR: Script failed to start: {type(e).__name__}: {str(e)}")
         return "", str(e), -1
+    while True:
+        result = _poll_blender_python_job(job, timeout=timeout)
+        if result is not None:
+            return result
+        time.sleep(0.05)
 
 
 def remap_library_paths(
@@ -1368,46 +1506,34 @@ def _get_project_size_limit_bytes(context=None):
         return 2 * 1024 * 1024 * 1024
 
 
-def pack_linked_in_blend(
+def _write_pack_linked_config(
     blend_path: Path,
-    max_size_bytes: Optional[int] = None,
-    pack_root: Optional[Path] = None,
-    search_roots: Optional[list] = None,
-) -> tuple[list[Path], list[Path]]:
-    """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
-
-    Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the hero blend stays hollow (~source size) while the ZIP still holds the trees.
-
-    Returns:
-        Tuple of (missing_files, oversized_files)
-    """
+    max_size_bytes: int,
+    pack_root: Optional[Path],
+    search_roots: Optional[list],
+) -> Path:
+    """Write JSON config for pack_linked_blend.py; caller deletes when the job finishes."""
     import json
-    import tempfile
 
-    if max_size_bytes is None:
-        max_size_bytes = 2 * 1024 * 1024 * 1024
+    payload = {
+        "max_size_bytes": int(max_size_bytes),
+        "pack_root": str(pack_root) if pack_root else str(blend_path.parent),
+        "search_roots": [str(p) for p in (search_roots or [])],
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(payload, f)
+        return Path(f.name)
 
-    script_path = Path(__file__).resolve().parent / "pack_linked_blend.py"
-    cfg_file = None
-    try:
-        payload = {
-            "max_size_bytes": int(max_size_bytes),
-            "pack_root": str(pack_root) if pack_root else str(blend_path.parent),
-            "search_roots": [str(p) for p in (search_roots or [])],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-            json.dump(payload, f)
-            cfg_file = Path(f.name)
-        stdout, stderr, returncode = _run_blender_python_file(
-            script_path, blend_path, config_path=cfg_file, timeout=600
-        )
-    finally:
-        if cfg_file is not None:
-            try:
-                cfg_file.unlink()
-            except OSError:
-                pass
 
+def _parse_pack_linked_output(
+    blend_path: Path,
+    stdout: str,
+    stderr: str,
+    returncode: int,
+    *,
+    timed_out: bool = False,
+) -> tuple[list[Path], list[Path]]:
+    """Parse pack_linked_blend.py stdout/stderr into (missing_files, oversized_files)."""
     missing_files: list[Path] = []
     oversized_files: list[Path] = []
     unpacked_libs: list[str] = []
@@ -1422,6 +1548,10 @@ def pack_linked_in_blend(
         if path not in missing_files and text not in {str(p) for p in missing_files}:
             missing_files.append(path)
 
+    if timed_out:
+        _add_missing(f"pack_linked_timeout:{blend_path.name}")
+        print(f"[BBP Pack]   FAILED (timeout): {blend_path.name}")
+
     if stdout:
         for line in stdout.splitlines():
             if line.startswith("MISSING_FILE:"):
@@ -1432,7 +1562,6 @@ def pack_linked_in_blend(
                 except Exception:
                     pass
             elif line.startswith("UNPACKED_LIB:"):
-                # "NAME" or "NAME | fp=..."
                 name = line.replace("UNPACKED_LIB:", "").strip().split("|", 1)[0].strip()
                 unpacked_libs.append(name)
                 _add_missing(name)
@@ -1441,7 +1570,6 @@ def pack_linked_in_blend(
                 unpacked_libs.append(name)
                 _add_missing(name)
             elif line.startswith("MISSING_ID:"):
-                # "materials/SomeMat | lib=SomeLib.blend.004 | fp=..."
                 body = line.replace("MISSING_ID:", "", 1).strip()
                 id_part = body.split("|", 1)[0].strip()
                 lib_part = ""
@@ -1462,13 +1590,11 @@ def pack_linked_in_blend(
         r"Unable to pack file, source path '([^']+)' not found",
         r"Cannot pack absolute file:\s*'([^']+)'",
         r"File not found:\s*(.+)",
-        # Blender: LIB: Material: 'SomeMat' missing from 'C:\...\SomeLib.blend'
         r"missing from\s+'([^']+)'",
         r"(\d+)\s+libraries and\s+(\d+)\s+linked data-blocks are missing",
     ):
         for match in re.finditer(pattern, combined_output, re.IGNORECASE):
             if "libraries and" in pattern:
-                # Surface a synthetic marker so the end report is not silent.
                 marker = Path(f"{match.group(1)}_libs_{match.group(2)}_ids_missing")
                 if marker not in missing_files:
                     missing_files.append(marker)
@@ -1486,7 +1612,7 @@ def pack_linked_in_blend(
                 missing_files.append(missing_path)
                 print(f"[BBP Pack]   WARNING: Blender reports missing library/ID path: {missing_path.name}")
 
-    if missing_files:
+    if missing_files and not timed_out:
         print(f"[BBP Pack]   WARNING: {len(missing_files)} linked files could not be packed (files not found):")
         for mf in missing_files[:5]:
             print(f"[BBP Pack]     - {mf.name if mf.name else mf}")
@@ -1511,16 +1637,289 @@ def pack_linked_in_blend(
         for err in pack_errors:
             print(f"[BBP Pack]   PACK_ERROR: {err}")
 
-    if returncode != 0:
+    if returncode != 0 and not timed_out:
         print(f"[BBP Pack] WARNING: pack_linked_in_blend returned non-zero exit code: {returncode}")
         if stderr:
             print(f"[BBP Pack]   Error details: {stderr[:500]}")
 
-    # Surface hollow-pack failure as missing so end-of-pack report is honest.
     for name in unpacked_libs:
         _add_missing(name)
 
     return missing_files, oversized_files
+
+
+def _prelocalize_pack_tree_libs(pack_root: Path) -> int:
+    """Copy pack-tree .blend basenames into pack_root/_bbp_linked so parallel pack_linked workers reuse instead of racing copies.
+
+    Cheap host-side pass before spawning workers; does not open Blender.
+    """
+    if not pack_root or not Path(pack_root).is_dir():
+        return 0
+    pack_root = Path(pack_root)
+    dest_dir = pack_root / "_bbp_linked"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in pack_root.rglob("*.blend"):
+        try:
+            if "_bbp_linked" in src.parts:
+                continue
+            if not src.is_file():
+                continue
+            dest = dest_dir / src.name
+            if dest.is_file():
+                try:
+                    if dest.stat().st_size == src.stat().st_size:
+                        continue
+                except OSError:
+                    pass
+                # Collision with different size — leave existing; pack_linked_blend disambiguates.
+                continue
+            shutil.copy2(src, dest)
+            copied += 1
+        except OSError as e:
+            print(f"[BBP Pack]   WARNING: pre-localize skipped {src.name}: {e}")
+    if copied:
+        print(f"[BBP Pack] Pre-localized {copied} blend(s) into {dest_dir.name}/ for parallel pack_linked")
+    return copied
+
+
+def _pack_linked_script_path() -> Path:
+    """Path to ops/pack_linked_blend.py."""
+    return Path(__file__).resolve().parent / "pack_linked_blend.py"
+
+
+def _start_pack_linked_job(
+    blend_path: Path,
+    max_size_bytes: int,
+    pack_root: Optional[Path],
+    search_roots: Optional[list],
+) -> _BlenderPythonJob:
+    """Start one pack_linked Blender job (non-blocking)."""
+    cfg = _write_pack_linked_config(blend_path, max_size_bytes, pack_root, search_roots)
+    try:
+        return _start_blender_python_file(_pack_linked_script_path(), blend_path, config_path=cfg)
+    except Exception:
+        try:
+            cfg.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+@dataclass
+class PackLinkedParallelRunner:
+    """Wave scheduler: non-hero blends in parallel (N workers), hero last; poll each tick."""
+
+    blends: list[Path]
+    hero_blend: Optional[Path]
+    pack_root: Path
+    search_roots: list
+    max_size_bytes: int
+    workers: int = 4
+    timeout_sec: float = 600.0
+    cancel_check: Optional[Callable[[], bool]] = None
+
+    # Internal state
+    _ready: list[Path] = field(default_factory=list, init=False)
+    _hero_queue: list[Path] = field(default_factory=list, init=False)
+    _active: list[_BlenderPythonJob] = field(default_factory=list, init=False)
+    _finished: int = field(default=0, init=False)
+    _total: int = field(default=0, init=False)
+    _started: bool = field(default=False, init=False)
+    _done: bool = field(default=False, init=False)
+    missing_files: list[Path] = field(default_factory=list, init=False)
+    oversized_files: list[Path] = field(default_factory=list, init=False)
+    failed_blends: list[Path] = field(default_factory=list, init=False)
+
+    def begin(self) -> None:
+        """Pre-localize _bbp_linked and split hero vs deps."""
+        if self._started:
+            return
+        self._started = True
+        _prelocalize_pack_tree_libs(self.pack_root)
+        hero_key = None
+        if self.hero_blend:
+            try:
+                hero_key = Path(self.hero_blend).resolve()
+            except OSError:
+                hero_key = Path(self.hero_blend)
+        deps: list[Path] = []
+        heroes: list[Path] = []
+        for p in self.blends:
+            if not Path(p).exists():
+                continue
+            try:
+                key = Path(p).resolve()
+            except OSError:
+                key = Path(p)
+            if hero_key is not None and key == hero_key:
+                heroes.append(Path(p))
+            else:
+                deps.append(Path(p))
+        # Fallback thin graph: all non-hero ready in parallel, hero final wave.
+        self._ready = deps
+        self._hero_queue = heroes
+        self._total = len(deps) + len(heroes)
+        self.workers = max(1, int(self.workers or 1))
+        print(
+            f"[BBP Pack] Pack-linked parallel: {len(deps)} dep(s), {len(heroes)} hero, "
+            f"workers={self.workers}, timeout={int(self.timeout_sec)}s"
+        )
+
+    def cancel_active(self) -> None:
+        """Kill all running Blender children."""
+        for job in list(self._active):
+            job.cancelled = True
+            _kill_blender_job(job)
+            _cleanup_job_temps(job)
+        self._active.clear()
+        self._done = True
+
+    def _reap(self, job: _BlenderPythonJob, stdout: str, stderr: str, returncode: int) -> None:
+        """Record one finished job; never print Completed on timeout."""
+        self._finished += 1
+        timed_out = bool(job.timed_out)
+        missing, oversized = _parse_pack_linked_output(
+            job.blend_path, stdout or "", stderr or "", returncode, timed_out=timed_out
+        )
+        if timed_out or returncode != 0:
+            self.failed_blends.append(job.blend_path)
+            if timed_out:
+                print(f"[BBP Pack]   [{self._finished}/{self._total}] Timed out (failed): {job.blend_path.name}")
+            else:
+                print(f"[BBP Pack]   [{self._finished}/{self._total}] Failed (exit {returncode}): {job.blend_path.name}")
+        else:
+            print(f"[BBP Pack]   [{self._finished}/{self._total}] Completed: {job.blend_path.name}")
+        if missing:
+            self.missing_files.extend(missing)
+        if oversized:
+            self.oversized_files.extend(oversized)
+        issues = []
+        if missing:
+            issues.append(f"{len(missing)} missing")
+        if oversized:
+            issues.append(f"{len(oversized)} over size limit")
+        if issues and not timed_out:
+            print(f"[BBP Pack]     Note: {', '.join(issues)} linked files could not be packed")
+
+    def _fill_slots(self) -> None:
+        """Spawn jobs from ready queue up to worker cap."""
+        while len(self._active) < self.workers and self._ready:
+            blend = self._ready.pop(0)
+            print(f"[BBP Pack]   Starting pack_linked: {blend.name} ({len(self._active) + 1}/{self.workers} slots)")
+            try:
+                job = _start_pack_linked_job(
+                    blend,
+                    self.max_size_bytes,
+                    self.pack_root,
+                    self.search_roots,
+                )
+            except Exception as e:
+                self._finished += 1
+                self.failed_blends.append(Path(blend))
+                self.missing_files.append(Path(f"pack_linked_start_failed:{Path(blend).name}"))
+                print(f"[BBP Pack]   [{self._finished}/{self._total}] Failed to start: {Path(blend).name}: {e}")
+                continue
+            self._active.append(job)
+
+    def tick(self) -> tuple[bool, str]:
+        """Poll jobs / fill slots. Returns (done, status_message)."""
+        if not self._started:
+            self.begin()
+        if self._done:
+            return True, "Packing linked… done"
+
+        if self.cancel_check and self.cancel_check():
+            self.cancel_active()
+            raise InterruptedError("Packing cancelled by user")
+
+        # Reap finished / timed-out jobs.
+        still_active: list[_BlenderPythonJob] = []
+        for job in self._active:
+            result = _poll_blender_python_job(job, timeout=self.timeout_sec)
+            if result is None:
+                still_active.append(job)
+                continue
+            stdout, stderr, returncode = result
+            self._reap(job, stdout, stderr, returncode)
+        self._active = still_active
+
+        self._fill_slots()
+
+        # When deps drained, enqueue hero as final wave.
+        if not self._ready and not self._active and self._hero_queue:
+            self._ready = list(self._hero_queue)
+            self._hero_queue.clear()
+            print(f"[BBP Pack] Pack-linked hero wave: {[p.name for p in self._ready]}")
+            self._fill_slots()
+
+        if not self._ready and not self._active and not self._hero_queue:
+            self._done = True
+            print(f"[BBP Pack] Finished packing linked libraries ({self._finished}/{self._total})")
+            if self.failed_blends:
+                print(f"[BBP Pack]   {len(self.failed_blends)} blend(s) failed/timed out during pack_linked")
+            return True, "Packing linked… done"
+
+        running_names = [j.blend_path.name for j in self._active[:3]]
+        more = len(self._active) - len(running_names)
+        running = ", ".join(running_names) + (f", +{more}" if more > 0 else "")
+        msg = (
+            f"Packing linked… ({self._finished}/{self._total} done, "
+            f"{len(self._active)} running: {running})"
+        )
+        return False, msg
+
+    def run_blocking(
+        self,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        progress_base: float = 80.0,
+        progress_span: float = 15.0,
+    ) -> tuple[list[Path], list[Path]]:
+        """Drive tick() until done (sync pack_project path)."""
+        self.begin()
+        while True:
+            done, msg = self.tick()
+            if progress_callback and self._total:
+                pct = progress_base + (self._finished / max(1, self._total)) * progress_span
+                progress_callback(pct, msg)
+            if done:
+                break
+            time.sleep(0.05)
+        return self.missing_files, self.oversized_files
+
+
+def pack_linked_in_blend(
+    blend_path: Path,
+    max_size_bytes: Optional[int] = None,
+    pack_root: Optional[Path] = None,
+    search_roots: Optional[list] = None,
+) -> tuple[list[Path], list[Path]]:
+    """Open a blend and run Pack Linked (pack libraries), then save with autopack on.
+
+    Logic lives in ops/pack_linked_blend.py. Absolute library paths (different path anchors) are localized into _bbp_linked/ first — otherwise Blender aborts pack_libraries() and the hero blend stays hollow (~source size) while the ZIP still holds the trees.
+
+    Returns:
+        Tuple of (missing_files, oversized_files)
+    """
+    if max_size_bytes is None:
+        max_size_bytes = 2 * 1024 * 1024 * 1024
+    timeout = int(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600))
+    cfg_file = None
+    try:
+        cfg_file = _write_pack_linked_config(blend_path, int(max_size_bytes), pack_root, search_roots)
+        stdout, stderr, returncode = _run_blender_python_file(
+            _pack_linked_script_path(), blend_path, config_path=cfg_file, timeout=timeout
+        )
+        timed_out = returncode == -1 and "timed out" in (stderr or "").lower()
+        return _parse_pack_linked_output(
+            blend_path, stdout or "", stderr or "", returncode, timed_out=timed_out
+        )
+    finally:
+        if cfg_file is not None:
+            try:
+                cfg_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class IncrementalPacker:
@@ -1579,6 +1978,7 @@ class IncrementalPacker:
         self.remap_index = 0
         self.pack_all_index = 0
         self.pack_linked_index = 0
+        self.pack_linked_runner: Optional[PackLinkedParallelRunner] = None
         
         # Cache truncation state
         self.cache_truncate_index = 0
@@ -1600,6 +2000,13 @@ class IncrementalPacker:
         # Results
         self.file_path = None
         self.error = None
+
+    def cancel_pack_linked_jobs(self) -> None:
+        """Kill any active pack_linked Blender children (modal cancel / ESC)."""
+        runner = getattr(self, "pack_linked_runner", None)
+        if runner is not None:
+            runner.cancel_active()
+            self.pack_linked_runner = None
 
     def _tick_phase_timing(self) -> None:
         """Log elapsed time when PackSession phase changes (verbose)."""
@@ -2079,78 +2486,41 @@ class IncrementalPacker:
             return ('COMPLETE', False)
         
         elif self.phase == 'PACK_LINKED':
-            if self.pack_linked_index == 0:
+            # Parallel pack_linked: poll Popen jobs each tick (deps ||, hero last).
+            if self.pack_linked_runner is None:
                 print(f"[BBP Pack] Packing linked libraries...")
                 self._progress(80.0, "Packing linked libraries...")
-                # Bottom-up: dependencies first, hero last so it embeds already-packed children.
-                if self.hero_blend and self.to_remap:
-                    try:
-                        hero_key = self.hero_blend.resolve()
-                    except OSError:
-                        hero_key = Path(self.hero_blend)
-                    rest, heroes = [], []
-                    for p in self.to_remap:
-                        try:
-                            key = Path(p).resolve()
-                        except OSError:
-                            key = Path(p)
-                        (heroes if key == hero_key else rest).append(p)
-                    if heroes:
-                        self.to_remap = rest + heroes
-                        _pack_diag(
-                            f"pack_linked order: {len(rest)} deps then hero {[p.name for p in heroes]}",
-                            verbose_only=True,
-                        )
-            units_this_tick = 0
-            while self.pack_linked_index < len(self.to_remap) and units_this_tick < batch_size:
-                if self.cancel_check and self.cancel_check():
-                    raise InterruptedError("Packing cancelled by user")
-                blend_to_fix = self.to_remap[self.pack_linked_index]
-                t0 = time.perf_counter()
-                if blend_to_fix.exists():
-                    progress_pct = 80.0 + ((self.pack_linked_index + 1) / len(self.to_remap) * 15.0) if self.to_remap else 80.0
-                    self._progress(progress_pct, f"Packing linked... ({self.pack_linked_index + 1}/{len(self.to_remap)})")
-                    print(f"[BBP Pack]   [{self.pack_linked_index + 1}/{len(self.to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    print(f"[BBP Pack]   Starting pack_linked operation (this may take a while for large files)...")
-                    try:
-                        missing_files, oversized_files = pack_linked_in_blend(
-                            blend_to_fix,
-                            max_size_bytes=self.max_size_bytes,
-                            pack_root=self.target_path,
-                            search_roots=self.search_roots,
-                        )
-                        _pack_diag(
-                            f"pack_linked {blend_to_fix.name}: {time.perf_counter() - t0:.2f}s "
-                            f"missing={len(missing_files or [])} oversized={len(oversized_files or [])}",
-                            verbose_only=True,
-                        )
-                        if missing_files:
-                            self.missing_files_all.extend(missing_files)
-                        if oversized_files:
-                            self.oversized_files_all.extend(oversized_files)
-                        issues = []
-                        if missing_files:
-                            issues.append(f"{len(missing_files)} missing")
-                        if oversized_files:
-                            issues.append(f"{len(oversized_files)} over size limit")
-                        if issues:
-                            print(f"[BBP Pack]   Completed pack_linked for: {blend_to_fix.name} (with {', '.join(issues)} linked files that couldn't be packed)")
-                        else:
-                            print(f"[BBP Pack]   Completed pack_linked for: {blend_to_fix.name}")
-                    except Exception as e:
-                        print(f"[BBP Pack]   ERROR during pack_linked: {type(e).__name__}: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-                else:
-                    print(f"[BBP Pack]   WARNING: Blend file does not exist: {blend_to_fix}")
-                self.pack_linked_index += 1
-                units_this_tick += 1
-                # Subprocess units are almost always hang-threshold; yield so UI can name the blend.
-                if self._unit_took_too_long("pack_linked", blend_to_fix.name, t0):
-                    break
-            if self.pack_linked_index < len(self.to_remap):
+                self.pack_linked_runner = PackLinkedParallelRunner(
+                    blends=list(self.to_remap or []),
+                    hero_blend=self.hero_blend,
+                    pack_root=self.target_path,
+                    search_roots=self.search_roots or [],
+                    max_size_bytes=int(self.max_size_bytes or (2 * 1024 * 1024 * 1024)),
+                    workers=int(getattr(config, "PACK_LINKED_WORKERS", 4)),
+                    timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600)),
+                    cancel_check=self.cancel_check,
+                )
+                self.pack_linked_runner.begin()
+            try:
+                done, msg = self.pack_linked_runner.tick()
+            except InterruptedError:
+                self.cancel_pack_linked_jobs()
+                raise
+            total = max(1, self.pack_linked_runner._total)
+            finished = self.pack_linked_runner._finished
+            progress_pct = 80.0 + (finished / total) * 15.0
+            self._progress(progress_pct, msg)
+            if self.pack_linked_runner._active:
+                # Hang status names the first running blend for the modal strip.
+                lead = self.pack_linked_runner._active[0].blend_path.name
+                self.hang_phase = "pack_linked"
+                self.hang_name = lead
+                self.hang_elapsed = time.time() - self.pack_linked_runner._active[0].t0
+            if not done:
                 return ('PACK_LINKED', False)
-            print(f"[BBP Pack] Finished packing linked libraries")
+            self.missing_files_all.extend(self.pack_linked_runner.missing_files)
+            self.oversized_files_all.extend(self.pack_linked_runner.oversized_files)
+            self.pack_linked_runner = None
             self.phase = 'COMPLETE'
             return ('COMPLETE', False)
         
@@ -2483,47 +2853,22 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
             print(f"[BBP Pack] Packing linked libraries...")
             if progress_callback:
                 progress_callback(80.0, "Packing linked libraries...")
-            # Bottom-up: deps first, hero last.
-            if hero_blend and to_remap:
-                try:
-                    hero_key = hero_blend.resolve()
-                except OSError:
-                    hero_key = Path(hero_blend)
-                rest, heroes = [], []
-                for p in to_remap:
-                    try:
-                        key = Path(p).resolve()
-                    except OSError:
-                        key = Path(p)
-                    (heroes if key == hero_key else rest).append(p)
-                if heroes:
-                    to_remap = rest + heroes
-            missing_files_all = []
-            for i, blend_to_fix in enumerate(to_remap, 1):
-                if cancel_check and cancel_check():
-                    raise InterruptedError("Packing cancelled by user")
-                if blend_to_fix.exists():
-                    progress_pct = 80.0 + (i / len(to_remap) * 15.0) if to_remap else 80.0
-                    if progress_callback:
-                        progress_callback(progress_pct, f"Packing linked... ({i}/{len(to_remap)})")
-                    print(f"[BBP Pack]   [{i}/{len(to_remap)}] Packing linked in: {blend_to_fix.name}")
-                    max_size_bytes = _get_project_size_limit_bytes()
-                    missing_files, oversized_files = pack_linked_in_blend(
-                        blend_to_fix,
-                        max_size_bytes=max_size_bytes,
-                        pack_root=target_path,
-                        search_roots=search_roots,
-                    )
-                    if missing_files:
-                        missing_files_all.extend(missing_files)
-                    issues = []
-                    if missing_files:
-                        issues.append(f"{len(missing_files)} missing")
-                    if oversized_files:
-                        issues.append(f"{len(oversized_files)} over 2GB")
-                    if issues:
-                        print(f"[BBP Pack]     Note: {', '.join(issues)} linked files could not be packed")
-            print(f"[BBP Pack] Finished packing linked libraries")
+            max_size_bytes = _get_project_size_limit_bytes()
+            runner = PackLinkedParallelRunner(
+                blends=list(to_remap or []),
+                hero_blend=hero_blend,
+                pack_root=target_path,
+                search_roots=search_roots or [],
+                max_size_bytes=int(max_size_bytes or (2 * 1024 * 1024 * 1024)),
+                workers=int(getattr(config, "PACK_LINKED_WORKERS", 4)),
+                timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600)),
+                cancel_check=cancel_check,
+            )
+            missing_files_all, _oversized_sync = runner.run_blocking(
+                progress_callback=progress_callback,
+                progress_base=80.0,
+                progress_span=15.0,
+            )
             missing_files_report.extend(missing_files_all)
     
     print(f"[BBP Pack] Pack process completed successfully!")
@@ -3096,6 +3441,14 @@ class BBP_OT_pack_zip(Operator):
         if cancelled and getattr(self, "_pack_t0", None) is not None:
             self._pack_duration = _report_pack_duration(self._pack_t0, cancelled=True)
             self._pack_t0 = None
+
+        # Kill parallel pack_linked Blender children if still running.
+        packer = getattr(self, "_packer", None)
+        if packer is not None and hasattr(packer, "cancel_pack_linked_jobs"):
+            try:
+                packer.cancel_pack_linked_jobs()
+            except Exception as e:
+                _pack_debug(f"WARNING: cancel_pack_linked_jobs failed: {e}")
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
@@ -3530,6 +3883,14 @@ class BBP_OT_pack_blend(Operator):
         if cancelled and getattr(self, "_pack_t0", None) is not None:
             self._pack_duration = _report_pack_duration(self._pack_t0, cancelled=True)
             self._pack_t0 = None
+
+        # Kill parallel pack_linked Blender children if still running.
+        packer = getattr(self, "_packer", None)
+        if packer is not None and hasattr(packer, "cancel_pack_linked_jobs"):
+            try:
+                packer.cancel_pack_linked_jobs()
+            except Exception as e:
+                _pack_debug(f"WARNING: cancel_pack_linked_jobs failed: {e}")
         
         # Restore original library_abspath function if we overrode it
         if hasattr(self, '_original_library_abspath'):
