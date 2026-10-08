@@ -365,6 +365,11 @@ def _unique_missing_names(missing: list) -> list[str]:
     return names
 
 
+def _blender_subprocess_timeout() -> int:
+    """Hard cap for Blender --python / --python-expr pack subprocesses (config)."""
+    return int(getattr(config, "BLENDER_SUBPROCESS_TIMEOUT_SEC", getattr(config, "PACK_LINKED_TIMEOUT_SEC", 15)))
+
+
 def _log_missing_assets_summary(missing: list) -> str:
     """Print Flamenco-style offline-files summary; return a UI message with basenames (or "")."""
     missing = _filter_ignorable_missing(missing)
@@ -379,6 +384,27 @@ def _log_missing_assets_summary(missing: list) -> str:
     print("[BBP Pack] Review the list — remap or remove in source blends if needed.")
     # Operator report: one basename per line so the Info log stays scannable.
     return f"{len(names)} missing/offline:\n" + "\n".join(names)
+
+
+def _format_pack_linked_failure_report(failed_blends: list) -> str:
+    """User-facing ERROR text when pack_linked timed out or exited non-zero."""
+    names = []
+    seen = set()
+    for p in failed_blends or []:
+        name = Path(p).name if p else str(p)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    if not names:
+        return ""
+    listed = ", ".join(names[:8])
+    more = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+    print(f"[BBP Pack] ERROR: Pack Linked FAILED for {len(names)} blend(s): {listed}{more}")
+    print("[BBP Pack]   This is either a project setup issue (broken/absolute/offline libs) or a BBP gap — do not treat this pack as farm-ready.")
+    return (
+        f"Pack Linked FAILED ({len(names)}): {listed}{more}. "
+        "Project setup issue or BBP gap — pack is not farm-ready."
+    )
 
 
 class DeadUncAssetError(RuntimeError):
@@ -1114,10 +1140,12 @@ def _log_blender_subprocess_output(stdout: str, stderr: str) -> None:
             print(f"[BBP Pack]     ... ({len(stderr_lines) - 10} more lines)")
 
 
-def _run_blender_script(script: str, blend_path: Path, timeout: int = 300) -> tuple[str, str, int]:
+def _run_blender_script(script: str, blend_path: Path, timeout: Optional[int] = None) -> tuple[str, str, int]:
     """Run an inline Python expression in a Blender subprocess (--python-expr)."""
     import subprocess
     import time
+    if timeout is None:
+        timeout = _blender_subprocess_timeout()
     print(f"[BBP Pack] Running Blender script on: {blend_path.name}")
     print(f"[BBP Pack]   Full path: {blend_path}")
     print(f"[BBP Pack]   Timeout: {timeout}s")
@@ -1312,9 +1340,11 @@ def _run_blender_python_file(
     script_path: Path,
     blend_path: Path,
     config_path: Optional[Path] = None,
-    timeout: int = 300,
+    timeout: Optional[int] = None,
 ) -> tuple[str, str, int]:
     """Run a .py file in a Blender subprocess: blender -b <blend> --python <script> [-- <config>]."""
+    if timeout is None:
+        timeout = _blender_subprocess_timeout()
     print(f"[BBP Pack]   Timeout: {timeout}s")
     try:
         job = _start_blender_python_file(script_path, blend_path, config_path=config_path)
@@ -1360,7 +1390,7 @@ def remap_library_paths(
     returncode = -1
     try:
         stdout, stderr, returncode = _run_blender_python_file(
-            remap_script_path, blend_path, config_path, timeout=300
+            remap_script_path, blend_path, config_path, timeout=_blender_subprocess_timeout()
         )
     finally:
         try:
@@ -1427,7 +1457,7 @@ def pack_all_in_blend(blend_path: Path, pack_root: Optional[Path] = None) -> lis
                 json.dump({"pack_root": str(pack_root)}, f)
                 cfg_file = Path(f.name)
         stdout, _stderr, _code = _run_blender_python_file(
-            script_path, blend_path, config_path=cfg_file, timeout=300
+            script_path, blend_path, config_path=cfg_file, timeout=_blender_subprocess_timeout()
         )
     finally:
         if cfg_file is not None:
@@ -1716,7 +1746,7 @@ class PackLinkedParallelRunner:
     search_roots: list
     max_size_bytes: int
     workers: int = 4
-    timeout_sec: float = 600.0
+    timeout_sec: float = 15.0
     cancel_check: Optional[Callable[[], bool]] = None
 
     # Internal state
@@ -1903,7 +1933,7 @@ def pack_linked_in_blend(
     """
     if max_size_bytes is None:
         max_size_bytes = 2 * 1024 * 1024 * 1024
-    timeout = int(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600))
+    timeout = int(getattr(config, "PACK_LINKED_TIMEOUT_SEC", _blender_subprocess_timeout()))
     cfg_file = None
     try:
         cfg_file = _write_pack_linked_config(blend_path, int(max_size_bytes), pack_root, search_roots)
@@ -1987,6 +2017,8 @@ class IncrementalPacker:
         self.oversized_files_all = []  # Collect all oversized files from pack_linked operations
         self.missing_files_all = []  # Collect missing/offline files for end-of-pack report
         self.missing_summary = ""  # Short UI message after COMPLETE
+        self.pack_linked_failed_blends: list[Path] = []  # Timed out / non-zero pack_linked
+        self.pack_linked_failure_summary = ""  # ERROR-level UI message when pack_linked failed
         
         # Phase timing (for Verbose Pack Log optimization)
         self._session_t0 = time.perf_counter()
@@ -2497,7 +2529,7 @@ class IncrementalPacker:
                     search_roots=self.search_roots or [],
                     max_size_bytes=int(self.max_size_bytes or (2 * 1024 * 1024 * 1024)),
                     workers=int(getattr(config, "PACK_LINKED_WORKERS", 4)),
-                    timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600)),
+                    timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", _blender_subprocess_timeout())),
                     cancel_check=self.cancel_check,
                 )
                 self.pack_linked_runner.begin()
@@ -2520,12 +2552,19 @@ class IncrementalPacker:
                 return ('PACK_LINKED', False)
             self.missing_files_all.extend(self.pack_linked_runner.missing_files)
             self.oversized_files_all.extend(self.pack_linked_runner.oversized_files)
+            self.pack_linked_failed_blends = list(self.pack_linked_runner.failed_blends)
+            self.pack_linked_failure_summary = _format_pack_linked_failure_report(
+                self.pack_linked_failed_blends
+            )
             self.pack_linked_runner = None
             self.phase = 'COMPLETE'
             return ('COMPLETE', False)
         
         elif self.phase == 'COMPLETE':
-            print(f"[BBP Pack] Pack process completed successfully!")
+            if self.pack_linked_failed_blends:
+                print(f"[BBP Pack] Pack process finished WITH FAILURES (pack_linked).")
+            else:
+                print(f"[BBP Pack] Pack process completed successfully!")
             print(f"[BBP Pack] Output directory: {self.target_path}")
             # Flush last phase timing + session totals for optimization
             if self._timed_phase is not None:
@@ -2534,11 +2573,16 @@ class IncrementalPacker:
             self.missing_files_all = _filter_ignorable_missing(self.missing_files_all)
             _pack_diag(
                 f"Final: copied_paths={len(self.copied_paths)} missing={len(self.missing_files_all)} "
-                f"recovery_hits={self._recovery_hits} blends_to_process={len(self.to_remap or [])}"
+                f"recovery_hits={self._recovery_hits} blends_to_process={len(self.to_remap or [])} "
+                f"pack_linked_failed={len(self.pack_linked_failed_blends)}"
             )
             _diag_copied_udim_tiles(self.target_path)
             # Flamenco-style: finish OK even with offline files; surface the list for the user
             self.missing_summary = _log_missing_assets_summary(self.missing_files_all)
+            if self.pack_linked_failed_blends and not self.pack_linked_failure_summary:
+                self.pack_linked_failure_summary = _format_pack_linked_failure_report(
+                    self.pack_linked_failed_blends
+                )
             
             # Determine file path for submission
             if self.copy_only_mode:
@@ -2861,7 +2905,7 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
                 search_roots=search_roots or [],
                 max_size_bytes=int(max_size_bytes or (2 * 1024 * 1024 * 1024)),
                 workers=int(getattr(config, "PACK_LINKED_WORKERS", 4)),
-                timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", 600)),
+                timeout_sec=float(getattr(config, "PACK_LINKED_TIMEOUT_SEC", _blender_subprocess_timeout())),
                 cancel_check=cancel_check,
             )
             missing_files_all, _oversized_sync = runner.run_blocking(
@@ -2870,8 +2914,13 @@ def pack_project(workflow: str, target_path: Optional[Path] = None,
                 progress_span=15.0,
             )
             missing_files_report.extend(missing_files_all)
+            if runner.failed_blends:
+                _format_pack_linked_failure_report(runner.failed_blends)
     
-    print(f"[BBP Pack] Pack process completed successfully!")
+    if any(str(p).startswith("pack_linked_timeout:") or str(p).startswith("pack_linked_start_failed:") for p in missing_files_report):
+        print(f"[BBP Pack] Pack process finished WITH FAILURES (pack_linked).")
+    else:
+        print(f"[BBP Pack] Pack process completed successfully!")
     _log_missing_assets_summary(missing_files_report)
     print(f"[BBP Pack] Output directory: {target_path}")
     
@@ -3405,10 +3454,15 @@ class BBP_OT_pack_zip(Operator):
                     pack_settings.pack_progress = 100.0
                     wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    pack_linked_fail = getattr(self._packer, "pack_linked_failure_summary", "") if self._packer else ""
                     dur = _report_pack_duration(getattr(self, "_pack_t0", None))
-                    done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
+                    if pack_linked_fail:
+                        done_msg = f"Pack finished with Pack Linked failures in {dur}" if dur else "Pack finished with Pack Linked failures"
+                    else:
+                        done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
+                    status_extra = pack_linked_fail or missing_summary
                     pack_settings.pack_status_message = (
-                        f"{done_msg.rstrip('!')} — {missing_summary}" if missing_summary else done_msg
+                        f"{done_msg.rstrip('!')} — {status_extra}" if status_extra else done_msg
                     )
                     
                     # Small delay to show completion
@@ -3419,6 +3473,8 @@ class BBP_OT_pack_zip(Operator):
                     if dur:
                         saved_msg = f"{saved_msg} ({dur})"
                     self.report({'INFO'}, saved_msg)
+                    if pack_linked_fail:
+                        self.report({'ERROR'}, pack_linked_fail)
                     if missing_summary:
                         self.report({'WARNING'}, missing_summary)
                     return {'FINISHED'}
@@ -3739,15 +3795,26 @@ class BBP_OT_pack_blend(Operator):
                     print(f"[BBP Pack] Applying frame range to hero blend: {self._blend_path.name}")
                     apply_frame_range_to_blend(self._blend_path, self._frame_start, self._frame_end, self._frame_step)
                     # Frame-range save can resurrect ghost Library stubs; re-seal pack_libraries/texts.
-                    print(f"[BBP Pack] Sealing packed blend after frame range: {self._blend_path.name}")
-                    seal_missing, _seal_over = pack_linked_in_blend(
-                        self._blend_path,
-                        max_size_bytes=_get_project_size_limit_bytes(context),
-                        pack_root=self._target_path or self._blend_path.parent,
-                        search_roots=getattr(self._packer, "search_roots", None) or [],
-                    )
-                    if seal_missing and self._packer:
-                        self._packer.missing_files_all.extend(seal_missing)
+                    # Skip seal when pack_linked already failed — another timeout won't fix a hollow/stuck hero.
+                    pack_linked_fail = getattr(self._packer, "pack_linked_failure_summary", "") if self._packer else ""
+                    if pack_linked_fail:
+                        print(f"[BBP Pack] Skipping post-frame-range seal — pack_linked already failed")
+                    else:
+                        print(f"[BBP Pack] Sealing packed blend after frame range: {self._blend_path.name}")
+                        seal_missing, _seal_over = pack_linked_in_blend(
+                            self._blend_path,
+                            max_size_bytes=_get_project_size_limit_bytes(context),
+                            pack_root=self._target_path or self._blend_path.parent,
+                            search_roots=getattr(self._packer, "search_roots", None) or [],
+                        )
+                        if seal_missing and self._packer:
+                            self._packer.missing_files_all.extend(seal_missing)
+                            # Seal timeout/failure must surface as Pack Linked failure too.
+                            if any(str(p).startswith("pack_linked_timeout:") for p in seal_missing):
+                                self._packer.pack_linked_failed_blends.append(self._blend_path)
+                                self._packer.pack_linked_failure_summary = _format_pack_linked_failure_report(
+                                    self._packer.pack_linked_failed_blends
+                                )
                     
                     self._phase = 'RESTORING_LIBRARY_ABSPATH'
                     return {'RUNNING_MODAL'}
@@ -3847,10 +3914,15 @@ class BBP_OT_pack_blend(Operator):
                     pack_settings.pack_progress = 100.0
                     wm_progress.set_progress(100)
                     missing_summary = getattr(self._packer, "missing_summary", "") if self._packer else ""
+                    pack_linked_fail = getattr(self._packer, "pack_linked_failure_summary", "") if self._packer else ""
                     dur = _report_pack_duration(getattr(self, "_pack_t0", None))
-                    done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
+                    if pack_linked_fail:
+                        done_msg = f"Pack finished with Pack Linked failures in {dur}" if dur else "Pack finished with Pack Linked failures"
+                    else:
+                        done_msg = f"Packing complete in {dur}!" if dur else "Packing complete!"
+                    status_extra = pack_linked_fail or missing_summary
                     pack_settings.pack_status_message = (
-                        f"{done_msg.rstrip('!')} — {missing_summary}" if missing_summary else done_msg
+                        f"{done_msg.rstrip('!')} — {status_extra}" if status_extra else done_msg
                     )
                     
                     # Small delay to show completion
@@ -3861,6 +3933,8 @@ class BBP_OT_pack_blend(Operator):
                     if dur:
                         saved_msg = f"{saved_msg} ({dur})"
                     self.report({'INFO'}, saved_msg)
+                    if pack_linked_fail:
+                        self.report({'ERROR'}, pack_linked_fail)
                     if missing_summary:
                         self.report({'WARNING'}, missing_summary)
                     return {'FINISHED'}

@@ -147,6 +147,8 @@ def rewrite_blend_paths_after_farm_sanitize(directory: Path, renames: dict[str, 
     try:
         for blend_path in blends:
             print(f"[BBP Export] Rewriting farm-safe paths in: {blend_path.name}")
+            from .. import config as _bbp_cfg
+            _timeout = int(getattr(_bbp_cfg, "BLENDER_SUBPROCESS_TIMEOUT_SEC", 15))
             result = subprocess.run(
                 [
                     "blender",
@@ -159,7 +161,7 @@ def rewrite_blend_paths_after_farm_sanitize(directory: Path, renames: dict[str, 
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=300,
+                timeout=_timeout,
             )
             if result.returncode != 0:
                 print(

@@ -20,9 +20,12 @@ DEBUG = False
 PACK_HANG_THRESHOLD_SEC = 0.1
 PACK_BATCH_UNBOUNDED = 10**9
 
+# Temporary hard cap on Blender subprocesses (remap / pack_all / pack_linked / seal) while diagnosing hangs — raise once we know what is legitimately slow.
+BLENDER_SUBPROCESS_TIMEOUT_SEC = 15
+
 # Pack-linked: parallel Blender subprocesses (deps in parallel, hero last). Timeout kills the worker; that blend is marked failed and the chain continues.
 PACK_LINKED_WORKERS = 4
-PACK_LINKED_TIMEOUT_SEC = 15
+PACK_LINKED_TIMEOUT_SEC = BLENDER_SUBPROCESS_TIMEOUT_SEC
 
 
 def note_pack_hang(state, phase: str, name: str, elapsed: float) -> None:
